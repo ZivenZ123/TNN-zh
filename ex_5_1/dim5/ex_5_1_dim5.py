@@ -125,12 +125,20 @@ model = (
 print(f"神经网络模型结构:\n{model}")
 
 # %%
-# 构造右端项函数 F(x) = Σ_{k=1}^d sin(2πx_k) * Π_{i≠k}^d sin(πx_i)
-# 这是一个五维函数, 每一项都是某个坐标的2π正弦乘以其他坐标的π正弦的乘积
-F = torch.ones((dim, dim, n_quadrature_points), dtype=dtype, device=device)
-F = torch.sin(pi * x) * F  # 先计算所有坐标的 sin(πx_i)
-for i in range(dim):
-    F[i, i, :] = torch.sin(2 * pi * x)  # 第i项中第i个坐标使用 sin(2πx_i)
+# 构造右端项函数 F(x_1, x_2, ..., x_d) = Σ_{k=1}^d sin(2πx_k) * Π_{i≠k}^d sin(πx_i)
+# 这是一个d维函数, 每一项都是某个坐标的2π正弦乘以其他坐标的π正弦的乘积
+sin_pi_x = torch.sin(pi * x)  # sin(πx_i) for all dimensions
+sin_2pi_x = torch.sin(2 * pi * x)  # sin(2πx_i) for all dimensions
+
+# 初始化F张量, 形状为 (dim, dim, n_quadrature_points)
+F = torch.zeros((dim, dim, n_quadrature_points), dtype=dtype, device=device)
+
+# 对每个k (第一个维度索引), 构造第k项: sin(2πx_k) * Π_{i≠k} sin(πx_i)
+for k in range(dim):
+    # 从所有维度的sin(πx_i)开始
+    F[k] = sin_pi_x.unsqueeze(0).expand(dim, -1)  # 复制到所有维度
+    # 将第k个维度替换为sin(2πx_k)
+    F[k, k, :] = sin_2pi_x
 
 # 系数向量, 用于组合不同的函数项
 alpha_F = torch.ones(dim, dtype=dtype, device=device)
