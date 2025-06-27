@@ -283,4 +283,4 @@ temp/
 # experiments/
 # scratch/ 
 
-tnn_implementation.py
+ex_*
