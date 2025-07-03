@@ -21,6 +21,7 @@ _高效解决偏微分方程求解中的维数灾难问题_
 - [项目结构](#项目结构)
 - [核心实现](#核心实现)
 - [使用示例](#使用示例)
+- [API 参考](#api-参考)
 - [贡献指南](#贡献指南)
 - [许可证](#许可证)
 
@@ -34,6 +35,7 @@ _高效解决偏微分方程求解中的维数灾难问题_
 
 - **张量分解**: 将高维函数表示为多个低维函数的张量积形式
 - **高效求解**: 有效解决偏微分方程求解中的维数灾难问题
+- **通用训练器**: 提供统一的训练接口，支持多种优化器和多阶段训练
 - **科学计算**: 专为科学计算和数值分析设计
 
 ### 理论基础
@@ -56,7 +58,7 @@ $$\mathrm{tnn}(x_1, x_2, \ldots, x_d) = \sum_{r=1}^{\mathrm{rank}} \theta_r \pro
 ### 安装 uv
 
 <details>
-<summary>点击展开安装说明</summary>
+<summary><strong>🔽 点击这里查看 uv 安装步骤</strong></summary>
 
 #### macOS / Linux
 
@@ -110,7 +112,8 @@ uv sync
 TNN-zh/
 ├── tnn/                           # TNN 核心包
 │   ├── __init__.py               # 包初始化
-│   └── core.py                   # 核心实现
+│   ├── core.py                   # 核心实现
+│   └── trainer.py                # 通用训练器
 ├── examples/                     # 示例代码
 │   ├── __init__.py              # 示例包初始化
 │   ├── laplacian_eigenvalue.py  # 拉普拉斯特征值问题
@@ -131,6 +134,7 @@ TNN-zh/
 | **SubTensorNeuralNetwork** | 子张量神经网络，处理一维输入输出         |
 | **TensorNeuralNetwork**    | 主要的 TNN 实现，支持高维张量分解        |
 | **TNNIntegrator**          | 张量积分器，利用高斯积分实现高效数值积分 |
+| **TNNTrainer**             | 通用训练器，支持多种优化器和多阶段训练   |
 | **DefaultSubNet**          | 默认子网络实现，提供全连接网络           |
 
 ### 核心算法
@@ -139,10 +143,41 @@ TNN-zh/
 2. **参数共享**: 相同维度的子网络共享参数，减少参数量
 3. **边界条件**: 自动应用齐次 Dirichlet 边界条件
 4. **数值积分**: 使用高斯积分器进行高效数值积分
+5. **多阶段训练**: 支持 Adam + LBFGS 组合优化策略
 
 ---
 
 ## 使用示例
+
+### 快速开始
+
+```python
+from tnn import TensorNeuralNetwork, TNNIntegrator, TNNTrainer
+
+# 创建5维TNN
+tnn = TensorNeuralNetwork(dim=5, rank=15, domain_bounds=[(0, 1)] * 5)
+
+# 创建积分器
+integrator = TNNIntegrator(n_quad_points=16)
+
+# 定义损失函数
+def loss_fn():
+    # 这里定义你的损失函数，例如 Rayleigh 商
+    return compute_your_loss(tnn, integrator)
+
+# 创建训练器
+trainer = TNNTrainer(tnn, loss_fn)
+
+# 配置多阶段训练
+training_phases = [
+    {'type': 'adam', 'lr': 0.001, 'epochs': 10, 'name': 'Adam 快速下降'},
+    {'type': 'adam', 'lr': 0.0001, 'epochs': 10, 'name': 'Adam 精细调优'},
+    {'type': 'lbfgs', 'lr': 1.0, 'epochs': 1, 'name': 'LBFGS 精确求解'},
+]
+
+# 执行训练
+losses, training_time = trainer.multi_phase(training_phases)
+```
 
 ### 拉普拉斯特征值问题
 
@@ -157,6 +192,25 @@ source .venv/bin/activate
 python examples/laplacian_eigenvalue.py
 ```
 
+**示例输出**:
+
+```
+>>> 5维拉普拉斯特征值问题 <<<
+张量秩: 15
+理论最小特征值: 49.348022
+
+>>> 开始多阶段训练 <<<
+TNN参数总数: 18090
+训练阶段数: 3
+
+>>> Adam 快速下降 阶段 <<<
+Epoch 0, Loss: 245.234567
+...
+
+最终特征值: 49.348123
+相对误差: 0.0002%
+```
+
 ### 混合导数 PDE 问题
 
 求解带混合导数的二元函数特征值问题：
@@ -169,6 +223,115 @@ uv run examples/mixed_derivative_pde.py
 source .venv/bin/activate
 python examples/mixed_derivative_pde.py
 ```
+
+---
+
+## API 参考
+
+### TNNTrainer 类
+
+`TNNTrainer` 是通用训练器，支持多种优化器和多阶段训练策略。
+
+#### 构造函数
+
+```python
+TNNTrainer(tnn, loss_fn, verbose=True)
+```
+
+**参数**:
+
+- `tnn`: TensorNeuralNetwork 实例
+- `loss_fn`: 损失函数，返回标量 tensor
+- `verbose`: 是否输出详细训练信息
+
+#### 主要方法
+
+##### multi_phase()
+
+```python
+multi_phase(phases) -> Tuple[List[float], float]
+```
+
+执行多阶段训练。
+
+**参数**:
+
+- `phases`: 训练阶段配置列表
+
+**返回**:
+
+- 损失历史和训练时间
+
+##### train_simple()
+
+```python
+train_simple(optimizer_type="adam", lr=0.001, epochs=100, **kwargs)
+```
+
+简单的单阶段训练。
+
+#### 训练阶段配置
+
+每个训练阶段的配置格式:
+
+```python
+{
+    'type': 'adam',        # 优化器类型: 'adam', 'lbfgs', 'sgd'
+    'lr': 0.001,           # 学习率
+    'epochs': 10,          # 训练轮数
+    'name': 'Adam 阶段',   # 阶段名称 (可选)
+    # 其他优化器特定参数...
+}
+```
+
+#### 支持的优化器
+
+| 优化器 | 类型标识 | 主要参数                                     |
+| ------ | -------- | -------------------------------------------- |
+| Adam   | 'adam'   | `lr`, `weight_decay`, `betas`, `eps`         |
+| LBFGS  | 'lbfgs'  | `lr`, `max_iter`, `tolerance_grad`           |
+| SGD    | 'sgd'    | `lr`, `momentum`, `weight_decay`, `nesterov` |
+
+### TensorNeuralNetwork 类
+
+主要的 TNN 实现，支持高维张量分解。
+
+#### 构造函数
+
+```python
+TensorNeuralNetwork(dim, rank, domain_bounds, subnet_factory=None)
+```
+
+**参数**:
+
+- `dim`: 输入维度
+- `rank`: 张量秩
+- `domain_bounds`: 域边界，格式为 `[(a₁,b₁), (a₂,b₂), ..., (aₙ,bₙ)]`
+- `subnet_factory`: 子网络工厂函数 (可选)
+
+#### 主要方法
+
+- `forward(x)`: 前向传播
+- `grad(dim)`: 计算关于指定维度的梯度
+- `multiply_1d_function(func, target_dim)`: 与一维函数相乘
+
+### TNNIntegrator 类
+
+张量积分器，利用高斯积分实现高效数值积分。
+
+#### 构造函数
+
+```python
+TNNIntegrator(n_quad_points=16)
+```
+
+**参数**:
+
+- `n_quad_points`: 高斯积分点数
+
+#### 主要方法
+
+- `tnn_int2(tnn1, tnn2, domain_bounds)`: 计算两个 TNN 函数的内积
 
 ---
 

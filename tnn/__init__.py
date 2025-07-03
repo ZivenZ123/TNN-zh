@@ -10,6 +10,7 @@ from .core import (
     TensorNeuralNetwork,
     TNNIntegrator,
 )
+from .trainer import TNNTrainer
 
 __version__ = "0.1.0"
 __author__ = "TNN Team"
@@ -19,4 +20,5 @@ __all__ = [
     "SubTensorNeuralNetwork",
     "TensorNeuralNetwork",
     "TNNIntegrator",
+    "TNNTrainer",
 ]

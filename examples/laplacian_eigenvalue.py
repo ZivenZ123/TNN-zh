@@ -7,9 +7,8 @@ Rayleigh商求解器 - 用于特征值问题的求解
 import math
 
 import torch
-import torch.optim as optim
 
-from tnn import TensorNeuralNetwork, TNNIntegrator
+from tnn import TensorNeuralNetwork, TNNIntegrator, TNNTrainer
 
 
 def gradient_squared_integral(
@@ -169,99 +168,56 @@ def laplacian_eigenvalue_problem():
 
     print(f">>> {dim} 维拉普拉斯特征值问题 <<<")
     print(f"张量秩: {rank}")
-    print(f"子网络总数: {rank * dim}")
+    # 计算理论特征值
+    theoretical_eigenvalue = dim * math.pi**2
+    print(f"理论最小特征值: {theoretical_eigenvalue:.6f}")
 
     # 定义域边界
     domain_bounds = [(0.0, 1.0) for _ in range(dim)]
 
-    # 创建重构的TNN
+    # 创建TNN
     tnn = TensorNeuralNetwork(
         dim=dim,
         rank=rank,
         domain_bounds=domain_bounds,
     )
 
-    print(f"TNN参数总数: {sum(p.numel() for p in tnn.parameters())}")
-
     # 创建积分器
-    integrator = TNNIntegrator(n_quad_points=8)
+    integrator = TNNIntegrator(n_quad_points=16)
 
-    theoretical_eigenvalue = dim * math.pi**2
-    print(f"理论最小特征值: {theoretical_eigenvalue:.6f}")
+    # 定义损失函数
+    def loss_fn():
+        return rayleigh_quotient(tnn, domain_bounds, integrator)
 
-    # ================== 三阶段优化 ==================
+    # 创建训练器
+    trainer = TNNTrainer(tnn, loss_fn)
 
-    # 优化过程
-    print("\n开始优化...")
+    # 配置训练阶段
+    training_phases = [
+        {
+            "type": "adam",
+            "lr": 0.001,
+            "epochs": 5,
+            "name": "Adam 快速下降",
+        },
+        {
+            "type": "adam",
+            "lr": 0.0001,
+            "epochs": 10,
+            "name": "Adam 精细调优",
+        },
+        {
+            "type": "lbfgs",
+            "lr": 1.0,
+            "epochs": 1,
+            "name": "LBFGS 精确求解",
+        },
+    ]
 
-    losses = []
+    # 执行训练
+    losses, training_time = trainer.multi_phase(training_phases)
 
-    # 阶段1: Adam快速下降 (5个epoch)
-    print(">>> 阶段1: Adam 快速下降 <<<")
-    optimizer1 = optim.Adam(tnn.parameters(), lr=0.001)
-
-    for epoch in range(5):
-        optimizer1.zero_grad()
-        loss = rayleigh_quotient(tnn, domain_bounds, integrator)
-        loss.backward()
-        optimizer1.step()
-
-        losses.append(loss.item())
-        relative_error = (
-            abs(loss.item() - theoretical_eigenvalue)
-            / theoretical_eigenvalue
-            * 100
-        )
-        print(
-            f"Epoch {epoch}, 特征值: {loss.item():.6f}, 相对误差: {relative_error:.3f}%"
-        )
-
-    # 阶段2: Adam精细调优 (10个epoch)
-    print("\n>>> 阶段2: Adam 精细调优 <<<")
-    optimizer2 = optim.Adam(tnn.parameters(), lr=0.0001)  # 更小的学习率
-
-    for epoch in range(10):
-        optimizer2.zero_grad()
-        loss = rayleigh_quotient(tnn, domain_bounds, integrator)
-        loss.backward()
-        optimizer2.step()
-
-        losses.append(loss.item())
-        relative_error = (
-            abs(loss.item() - theoretical_eigenvalue)
-            / theoretical_eigenvalue
-            * 100
-        )
-        print(
-            f"Epoch {5 + epoch}, 特征值: {loss.item():.6f}, 相对误差: {relative_error:.3f}%"
-        )
-
-    # 阶段3: LBFGS精确求解 (5个epoch)
-    print("\n>>> 阶段3: LBFGS 精确求解 <<<")
-    optimizer3 = optim.LBFGS(tnn.parameters(), lr=1.0)
-
-    for epoch in range(5):
-
-        def closure():
-            optimizer3.zero_grad()
-            loss = rayleigh_quotient(tnn, domain_bounds, integrator)
-            loss.backward()
-            return loss.item()
-
-        loss = optimizer3.step(closure)
-        losses.append(loss.item() if isinstance(loss, torch.Tensor) else loss)
-
-        current_loss = losses[-1]
-        relative_error = (
-            abs(current_loss - theoretical_eigenvalue)
-            / theoretical_eigenvalue
-            * 100
-        )
-        print(
-            f"Epoch {15 + epoch}, 特征值: {current_loss:.8f}, 相对误差: {relative_error:.4f}%"
-        )
-
-    # ================== 结果总结 ==================
+    # 分析结果
     final_eigenvalue = losses[-1]
     final_error = (
         abs(final_eigenvalue - theoretical_eigenvalue)
@@ -269,18 +225,11 @@ def laplacian_eigenvalue_problem():
         * 100
     )
 
-    print(f"\n{'=' * 50}")
-    print("优化完成!")
+    print("\n特征值问题结果分析:")
     print(f"理论特征值: {theoretical_eigenvalue:.8f}")
-    print(f"最终特征值: {final_eigenvalue:.8f}")
-    print(f"最终相对误差: {final_error:.4f}%")
-    print(f"总训练轮数: {len(losses)}")
-
-    # 分析收敛过程
-    print("\n收敛分析:")
-    print(f"阶段1 (Adam快速): {losses[0]:.6f} -> {losses[4]:.6f}")
-    print(f"阶段2 (Adam精细): {losses[4]:.6f} -> {losses[14]:.6f}")
-    print(f"阶段3 (LBFGS): {losses[14]:.6f} -> {losses[-1]:.8f}")
+    print(f"计算特征值: {final_eigenvalue:.8f}")
+    print(f"相对误差: {final_error:.4f}%")
+    print(f"总训练时间: {training_time:.2f} 秒")
 
     return tnn, losses
 

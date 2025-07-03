@@ -7,9 +7,8 @@
 import math
 
 import torch
-import torch.optim as optim
 
-from tnn import TensorNeuralNetwork, TNNIntegrator
+from tnn import TensorNeuralNetwork, TNNIntegrator, TNNTrainer
 
 
 def mixed_derivative_eigenvalue_problem():
@@ -38,6 +37,8 @@ def mixed_derivative_eigenvalue_problem():
     dim = 2  # 二维问题
     rank = 5  # 张量秩
     lambda_val = 20.0  # 特征值参数, 可调整
+    print(f"张量秩: {rank}")
+    print(f"特征值λ: {lambda_val}")
 
     # 定义域边界 [0,1] × [0,1]
     domain_bounds = [(0.0, 1.0), (0.0, 1.0)]
@@ -49,9 +50,8 @@ def mixed_derivative_eigenvalue_problem():
         domain_bounds=domain_bounds,
     )
 
-    print(f"TNN参数总数: {sum(p.numel() for p in tnn.parameters())}")
-    print(f"张量秩: {rank}")
-    print(f"特征值λ: {lambda_val}")
+    # 创建积分器
+    integrator = TNNIntegrator(n_quad_points=16)
 
     # 定义势函数
     def V1_func(x):
@@ -62,10 +62,7 @@ def mixed_derivative_eigenvalue_problem():
         """V₂(y) = sin(√2πy)"""
         return torch.sin(torch.sqrt(torch.tensor(2 * math.pi)) * y)
 
-    # 创建积分器
-    integrator = TNNIntegrator(n_quad_points=16)
-
-    def compute_loss_function():
+    def loss_fn():
         """
         计算损失函数: ||-Du + V₁u + V₂u - λu||²₂
 
@@ -107,110 +104,40 @@ def mixed_derivative_eigenvalue_problem():
 
         return l2_norm_squared
 
-    # 优化过程
-    print("\n开始优化...")
+    # 创建训练器
+    trainer = TNNTrainer(tnn, loss_fn)
 
-    # 三阶段优化策略
-    losses = []
+    # 配置训练阶段
+    training_phases = [
+        {
+            "type": "adam",
+            "lr": 0.001,
+            "epochs": 10,
+            "name": "Adam 快速下降",
+        },
+        {
+            "type": "adam",
+            "lr": 0.0001,
+            "epochs": 10,
+            "name": "Adam 精细调优",
+        },
+        {
+            "type": "lbfgs",
+            "lr": 1.0,
+            "epochs": 1,
+            "name": "LBFGS 精确求解",
+        },
+    ]
 
-    # 阶段1: Adam快速下降
-    print(">>> 阶段1: Adam 快速下降 <<<")
-    optimizer1 = optim.Adam(tnn.parameters(), lr=0.001)
+    # 执行训练
+    losses, training_time = trainer.multi_phase(training_phases)
 
-    for epoch in range(20):
-        optimizer1.zero_grad()
-        loss = compute_loss_function()
-        loss.backward()
-        optimizer1.step()
-
-        losses.append(loss.item())
-        if epoch % 1 == 0:
-            print(f"Epoch {epoch}: Loss = {loss.item():.8f}")
-
-    # 阶段2: Adam精细调优
-    print("\n>>> 阶段2: Adam 精细调优 <<<")
-    optimizer2 = optim.Adam(tnn.parameters(), lr=0.0001)
-
-    for epoch in range(20):
-        optimizer2.zero_grad()
-        loss = compute_loss_function()
-        loss.backward()
-        optimizer2.step()
-
-        losses.append(loss.item())
-        if epoch % 5 == 0:
-            print(f"Epoch {20 + epoch}: Loss = {loss.item():.8f}")
-
-    # 阶段3: LBFGS精确求解
-    print("\n>>> 阶段3: LBFGS 精确求解 <<<")
-    optimizer3 = optim.LBFGS(tnn.parameters(), lr=1.0)
-
-    for epoch in range(10):
-
-        def closure():
-            optimizer3.zero_grad()
-            loss = compute_loss_function()
-            loss.backward()
-            return loss.item()
-
-        loss = optimizer3.step(closure)
-        losses.append(loss.item() if isinstance(loss, torch.Tensor) else loss)
-
-        if epoch % 2 == 0:
-            print(f"Epoch {40 + epoch}: Loss = {losses[-1]:.10f}")
-
-    print("\n优化完成!")
-    print(f"最终损失: {losses[-1]:.10f}")
-
-    # 分析收敛过程
-    print("\n收敛分析:")
-    print(f"阶段1 (Adam快速): {losses[0]:.8f} -> {losses[19]:.8f}")
-    print(f"阶段2 (Adam精细): {losses[19]:.8f} -> {losses[39]:.8f}")
-    print(f"阶段3 (LBFGS): {losses[39]:.8f} -> {losses[-1]:.10f}")
-
-    # 测试函数在几个点的值
-    test_points = torch.tensor(
-        [[0.25, 0.25], [0.5, 0.5], [0.75, 0.75]], requires_grad=True
-    )
-
-    print("\n函数值测试:")
-    with torch.no_grad():
-        values = tnn(test_points)
-        for point, value in zip(test_points, values, strict=False):
-            print(f"u({point[0]:.2f}, {point[1]:.2f}) = {value.item():.6f}")
-
-    # 计算各项分量在测试点的值
-    print("\n各项分量分析:")
-    # 注意: 这里不能使用torch.no_grad(), 因为需要计算梯度
-    # 选择一个测试点进行详细分析
-    test_point = torch.tensor([[0.5, 0.5]], requires_grad=True)
-
-    # 计算u值
-    u_val = tnn(test_point)
-
-    # 计算导数项
-    u_x = tnn.grad(0)
-    u_y = tnn.grad(1)
-    u_xx = u_x.grad(0)
-    u_yy = u_y.grad(1)
-    u_xy = u_x.grad(1)
-
-    Du_val = (u_xx + 2.0 * u_xy + u_yy)(test_point)
-
-    # 计算势能项
-    V1_u_val = tnn.multiply_1d_function(V1_func, 0)(test_point)
-    V2_u_val = tnn.multiply_1d_function(V2_func, 1)(test_point)
-
-    print("在点(0.5, 0.5)处:")
-    print(f"  u = {u_val.item():.6f}")
-    print(f"  Du = {Du_val.item():.6f}")
-    print(f"  V₁u = {V1_u_val.item():.6f}")
-    print(f"  V₂u = {V2_u_val.item():.6f}")
-    print(f"  λu = {lambda_val * u_val.item():.6f}")
+    print(f"\n最终损失: {losses[-1]:.10f}")
+    print(f"总训练时间: {training_time:.2f} 秒")
 
     return tnn, losses
 
 
 # 运行示例
 if __name__ == "__main__":
-    tnn_mixed, losses_mixed = mixed_derivative_eigenvalue_problem()
+    tnn_result, losses_result = mixed_derivative_eigenvalue_problem()

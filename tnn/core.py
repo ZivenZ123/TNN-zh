@@ -1,4 +1,3 @@
-# %%
 """
 张量神经网络 (TNN)
 
@@ -11,7 +10,6 @@ import torch
 import torch.nn as nn
 
 
-# %%
 class DefaultSubNet(nn.Module):
     """
     默认的子网络实现 - 用于TensorNeuralNetwork的标准子网络
@@ -1116,7 +1114,6 @@ class TensorNeuralNetwork(nn.Module):
         return product_tnn
 
 
-# %%
 class TNNIntegrator(nn.Module):
     """
     TNN的张量积分器 - 集成高斯积分功能
