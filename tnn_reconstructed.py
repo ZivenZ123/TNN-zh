@@ -1,29 +1,59 @@
 # %%
 """
-张量神经网络 (TNN) 重构实现
-
-基于论文 "Tensor Neural Network and Its Numerical Integration"
-以及手写推导的数学公式
+张量神经网络 (TNN)
 
 核心数学表达式:
 tnn(x₁, x₂, ..., x_dim) = Σ_{r=1}^{rank} θᵣ Π_{d=1}^{dim} subtnn_d^{(r)}(x_d)
-
-关键改进:
-1. 子网络从 R → R^{rank} 改为 R → R (一维到一维)
-2. 需要 rank × dim 个子网络
-3. 在每层激活前添加归一化
-4. 优化积分方法: tnn_int2 使用 _create_product_tnn + tnn_int1
 """
-
-import math
 
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
 
 
 # %%
+class DefaultSubNet(nn.Module):
+    """
+    默认的子网络实现 - 用于TensorNeuralNetwork的标准子网络
+
+    这是TensorNeuralNetwork中使用的默认子网络实现, 是一个标准的全连接神经网络.
+    每个子网络负责处理单个维度的输入并输出对应的标量值.
+
+    网络结构:
+    - 输入维度: 1 (处理单个维度的标量输入)
+    - 输出维度: rank (对应TNN中的张量秩)
+    - 激活函数: sin激活函数, 适合逼近振荡函数和特征函数
+    - 归一化: 层归一化, 提高训练稳定性
+    - 最终激活: Tanh激活, 将输出限制在[-1,1]范围内
+
+    这个默认实现为TensorNeuralNetwork提供了开箱即用的子网络结构,
+    用户也可以根据具体问题需求自定义其他类型的子网络.
+    """
+
+    class SinActivation(nn.Module):
+        """Sin激活函数"""
+
+        def forward(self, x):
+            return torch.sin(x)
+
+    def __init__(self, rank: int):
+        super().__init__()
+
+        self.network = nn.Sequential(
+            nn.Linear(1, 50),
+            nn.LayerNorm(50),
+            self.SinActivation(),
+            nn.Linear(50, 50),
+            nn.LayerNorm(50),
+            self.SinActivation(),
+            nn.Linear(50, rank),
+            nn.Tanh(),
+        )
+
+    def forward(self, x):
+        return self.network(x)
+
+
 class SubTensorNeuralNetwork(nn.Module):
     """
     SubTensorNeuralNetwork - TNN的子网络 (一维到一维)
@@ -35,71 +65,34 @@ class SubTensorNeuralNetwork(nn.Module):
     subtnn_d^{(r)}(x_d) ∈ R
 
     特点:
-    - 在每层激活前进行归一化, 提高训练稳定性
-    - 支持多种激活函数
-    - 可选择是否使用层归一化
+    - 接受外部定义的网络结构作为参数
     - 内置边界条件处理, 支持齐次Dirichlet边界条件
+    - 支持梯度计算和函数乘积运算
 
     Args:
-        input_dim: 输入维度, 必须为1
-        output_dim: 输出维度, 必须为1
-        hidden_dims: 隐藏层维度的元组, 例如(50, 50)表示两个隐藏层各50个神经元
-        activation: 激活函数类型, 支持'sin', 'relu', 'tanh'
-        use_layer_norm: 是否使用层归一化, 默认为True
+        network: 神经网络模块 (nn.Module), 输入输出都应该是一维的
         boundary_condition: 边界条件设置, 格式为(a, b)表示在区间[a,b]上应用齐次Dirichlet边界条件
     """
 
     def __init__(
         self,
-        input_dim: int = 1,
-        output_dim: int = 1,
-        hidden_dims: tuple[int, ...] = (50, 50),
-        activation: str = "sin",
-        use_layer_norm: bool = True,
+        network: nn.Module,
         boundary_condition: tuple[float, float] | None = None,
     ):
         super().__init__()
 
+        # 存储传入的网络, 参数也会被自动包含
+        self.network = network
+
         # 边界条件设置
         self.boundary_condition = boundary_condition
 
-        # 构建网络层
-        layers = []
-        layer_norms = []
-        prev_dim = input_dim
-
-        for hidden_dim in hidden_dims:
-            layers.append(nn.Linear(prev_dim, hidden_dim))
-            if use_layer_norm:
-                layer_norms.append(nn.LayerNorm(hidden_dim))
-            else:
-                layer_norms.append(nn.Identity())
-            prev_dim = hidden_dim
-
-        # 输出层 - 不使用归一化, 保持输出值的原始大小用于张量积运算
-        layers.append(nn.Linear(prev_dim, output_dim))
-
-        self.layers = nn.ModuleList(layers)
-        self.layer_norms = nn.ModuleList(layer_norms)
-        self.use_layer_norm = use_layer_norm
-
-        # 激活函数
-        if activation == "sin":
-            self.activation = torch.sin
-        elif activation == "relu":
-            self.activation = torch.relu
-        elif activation == "tanh":
-            self.activation = torch.tanh
-        else:
-            self.activation = torch.relu
-
-    def forward(self, x):
+    def forward(self, x: torch.Tensor):  # todo: 把所有运算都明确为张量的运算
         """
         前向传播计算
 
-        对输入的一维数据进行前向传播, 通过多层全连接网络输出标量值.
-        隐藏层使用归一化和激活函数, 输出层只使用激活函数(不归一化).
-        如果设置了边界条件, 会自动应用齐次Dirichlet边界条件.
+        对输入的一维数据进行前向传播, 通过传入的神经网络输出标量值.
+        如果设置了边界条件, 会强制应用齐次Dirichlet边界条件.
 
         Args:
             x: 输入张量, shape为(batch_size, 1)
@@ -107,26 +100,20 @@ class SubTensorNeuralNetwork(nn.Module):
         Returns:
             输出张量, shape为(batch_size, 1), 已应用边界条件
         """
-        # 神经网络的前向传播
-        output = x
+        # 通过传入的网络进行前向传播
+        output = self.network(x)
 
-        # 处理隐藏层 (有归一化)
-        for i in range(len(self.layers) - 1):
-            layer = self.layers[i]
-            layer_norm = self.layer_norms[i]
-            output = layer(output)
-            # 在激活前进行归一化
-            output = layer_norm(output)
-            output = self.activation(output)
-
-        # 处理输出层 (无归一化)
-        output = self.layers[-1](output)
-        output = self.activation(output)
-
-        # 应用边界条件
+        # >>> 强制应用边界条件 <<<
         if self.boundary_condition is not None:
             a, b = self.boundary_condition
-            # 齐次Dirichlet边界条件: (x - a)(b - x) * network_output
+
+            # 检查输入x是否在边界条件范围内
+            if torch.any(x < a) or torch.any(x > b):
+                raise ValueError(
+                    f"输入x必须在边界条件范围[{a}, {b}]内, 但接收到的x范围为[{x.min().item():.6f}, {x.max().item():.6f}]"
+                )
+
+            # 齐次Dirichlet边界条件: boundary_factor * output
             boundary_factor = (x - a) * (b - x)
             # 归一化boundary_factor到[0, 2]范围
             # 最大值在区间中点处: ((b-a)/2)^2
@@ -154,7 +141,7 @@ class SubTensorNeuralNetwork(nn.Module):
             SubTensorNeuralNetwork: 新的梯度子网络实例
 
         Example:
-            >>> subnet = SubTensorNeuralNetwork()
+            >>> subnet = SubTensorNeuralNetwork(network)
             >>> grad_subnet = subnet.grad()
             >>> x = torch.tensor([[0.5]], requires_grad=True)
             >>> y = subnet(x)        # 原函数值
@@ -167,21 +154,12 @@ class SubTensorNeuralNetwork(nn.Module):
             - 支持链式求导: subnet.grad().grad() 计算二阶导数
         """
 
-        class DerivativeSubTensorNeuralNetwork(SubTensorNeuralNetwork):
-            """导数子网络的特殊实现"""
+        class DerivativeNetwork(nn.Module):
+            """导数网络的特殊实现"""
 
             def __init__(self, original_subnet: "SubTensorNeuralNetwork"):
-                # 继承原始子网络的基本配置
-                super().__init__(
-                    input_dim=1,
-                    output_dim=1,
-                    hidden_dims=(1,),  # 最小配置, 因为我们会重写forward
-                    activation="sin",
-                    use_layer_norm=False,
-                    boundary_condition=original_subnet.boundary_condition,
-                )
-
-                # 保存原始子网络的引用
+                super().__init__()
+                # 保存原始子网络的引用, 原始子网络的参数会被自动包含
                 self.original_subnet = original_subnet
 
             def forward(self, x):
@@ -198,8 +176,14 @@ class SubTensorNeuralNetwork(nn.Module):
                 )[0]
                 return grad_y
 
+        # 创建导数网络
+        derivative_network = DerivativeNetwork(self)
+
         # 返回新的梯度子网络
-        return DerivativeSubTensorNeuralNetwork(self)
+        return SubTensorNeuralNetwork(
+            network=derivative_network,
+            boundary_condition=None,  # 不用强制应用边界条件, 否则不是真正的导数
+        )
 
     def multiply_by_function(self, func) -> "SubTensorNeuralNetwork":
         """
@@ -223,22 +207,13 @@ class SubTensorNeuralNetwork(nn.Module):
             - 保持原子网络的边界条件设置
         """
 
-        class FunctionProductSubTensorNeuralNetwork(SubTensorNeuralNetwork):
-            """函数乘积子网络的特殊实现"""
+        class FunctionProductNetwork(nn.Module):
+            """函数乘积网络的特殊实现"""
 
             def __init__(
                 self, original_subnet: "SubTensorNeuralNetwork", func
             ):
-                # 继承原始子网络的基本配置
-                super().__init__(
-                    input_dim=1,
-                    output_dim=1,
-                    hidden_dims=(1,),  # 最小配置, 因为我们会重写forward
-                    activation="sin",
-                    use_layer_norm=False,
-                    boundary_condition=original_subnet.boundary_condition,
-                )
-
+                super().__init__()
                 # 保存原始子网络和函数的引用
                 self.original_subnet = original_subnet
                 self.func = func
@@ -249,8 +224,66 @@ class SubTensorNeuralNetwork(nn.Module):
                 func_output = self.func(x)
                 return func_output * subnet_output
 
+        # 创建函数乘积网络
+        function_product_network = FunctionProductNetwork(self, func)
+
         # 返回新的函数乘积子网络
-        return FunctionProductSubTensorNeuralNetwork(self, func)
+        return SubTensorNeuralNetwork(
+            network=function_product_network,
+            boundary_condition=None,  # 不用强制应用边界条件, 否则不是真正的乘积
+        )
+
+    def multiply_by_subnet(
+        self, other: "SubTensorNeuralNetwork"
+    ) -> "SubTensorNeuralNetwork":
+        """
+        创建两个子网络乘积的新子网络
+
+        将两个子网络的输出进行逐元素乘法, 生成一个新的乘积子网络.
+        这是实现TNN乘积运算的核心组件.
+
+        数学表示: h(x) = f(x) * g(x)
+        其中f和g分别是当前子网络和other子网络的输出函数
+
+        Args:
+            other: 另一个SubTensorNeuralNetwork实例
+
+        Returns:
+            SubTensorNeuralNetwork: 新的乘积子网络, 计算两个输入子网络的乘积
+
+        Note:
+            - 返回的是一个全新的子网络对象
+            - 计算过程保持自动微分的兼容性
+            - 保持原子网络的边界条件设置
+        """
+
+        class SubnetProductNetwork(nn.Module):
+            """子网络乘积网络的特殊实现"""
+
+            def __init__(
+                self,
+                subnet1: "SubTensorNeuralNetwork",
+                subnet2: "SubTensorNeuralNetwork",
+            ):
+                super().__init__()
+                # 保存原始子网络的引用
+                self.subnet1 = subnet1
+                self.subnet2 = subnet2
+
+            def forward(self, x):
+                """计算两个子网络输出的乘积"""
+                y1 = self.subnet1(x)
+                y2 = self.subnet2(x)
+                return y1 * y2
+
+        # 创建子网络乘积网络
+        subnet_product_network = SubnetProductNetwork(self, other)
+
+        # 返回新的子网络乘积子网络
+        return SubTensorNeuralNetwork(
+            network=subnet_product_network,
+            boundary_condition=None,  # 不用强制应用边界条件, 否则不是真正的乘积
+        )
 
 
 class TensorNeuralNetwork(nn.Module):
@@ -277,9 +310,14 @@ class TensorNeuralNetwork(nn.Module):
 
     Args:
         dim: 输入维度
-        rank: 张量分解的秩, 默认为10
-        hidden_dims: 子网络的隐藏层维度, 默认为(50, 50)
-        activation: 激活函数类型, 支持"sin", "relu", "tanh", 默认为"sin"
+        rank: 张量分解的秩
+        subnetworks: 二维列表, 包含rank×dim个SubTensorNeuralNetwork实例
+            数据结构: list[list[SubTensorNeuralNetwork]]
+            格式: subnetworks[r][d] 对应第r个秩分量的第d维子网络
+            形状: [rank, dim] - 外层列表长度为rank, 内层列表长度为dim
+            示例:
+                * 2×3 TNN: [[subnet₀₀, subnet₀₁, subnet₀₂], [subnet₁₀, subnet₁₁, subnet₁₂]]
+                * 每个subnet都是SubTensorNeuralNetwork实例, 处理R→R映射
         domain_bounds: 定义域边界, 用于边界条件处理, 默认为None
             domain_bounds 数据结构:
             - 类型: list[tuple[float, float]] | None
@@ -290,55 +328,143 @@ class TensorNeuralNetwork(nn.Module):
                 * 2维: [(0.0, 1.0), (-1.0, 1.0)]  # x₁ ∈ [0,1], x₂ ∈ [-1,1]
                 * 3维: [(0.0, 1.0), (0.0, 1.0), (0.0, 1.0)]  # 单位立方体
                 * 高维: [(0.0, 1.0) for _ in range(dim)]  # 简洁写法
-        use_coefficients: 是否使用可学习的θᵣ系数, 默认为True
-        use_layer_norm: 是否在子网络中使用层归一化, 默认为True
     """
+
+    class ThetaModule(nn.Module):
+        """
+        TNN系数θ模块
+
+        专门用于管理TNN中的可学习系数θᵣ的模块. 支持可学习和固定两种模式,
+        并提供标量乘法等操作.
+
+        Args:
+            rank: 张量分解的秩, 即系数的数量
+            initial_values: 初始系数值, 默认为None (使用全1初始化)
+        """
+
+        def __init__(
+            self,
+            rank: int,
+            initial_values: torch.Tensor | None = None,
+        ):
+            super().__init__()
+            self.rank = rank
+
+            if initial_values is None:
+                initial_values = torch.ones(rank)
+            else:
+                # 验证initial_values必须是一阶张量
+                if not isinstance(initial_values, torch.Tensor):
+                    raise TypeError(
+                        f"initial_values必须是torch.Tensor类型, 但得到了{type(initial_values)}"
+                    )
+                if initial_values.dim() != 1:
+                    raise ValueError(
+                        f"initial_values必须是一阶张量, 但得到了{initial_values.dim()}阶张量"
+                    )
+                if initial_values.size(0) != rank:
+                    raise ValueError(
+                        f"initial_values的长度{initial_values.size(0)}与rank{rank}不匹配"
+                    )
+
+            # 可学习参数: θᵣ会在训练过程中更新
+            self.theta = nn.Parameter(initial_values)
+
+        def forward(self):
+            """返回系数张量"""
+            return self.theta
 
     def __init__(
         self,
         dim: int,
-        rank: int = 10,
-        hidden_dims: tuple[int, ...] = (50, 50),
-        activation: str = "sin",
+        rank: int,
+        subnetworks: list[list[SubTensorNeuralNetwork]] | None = None,
         domain_bounds: list[tuple[float, float]] | None = None,
-        use_coefficients: bool = True,
-        use_layer_norm: bool = True,
     ):
         super().__init__()
 
         self.dim = dim
         self.rank = rank
         self.domain_bounds = domain_bounds
-        self.use_coefficients = use_coefficients
 
-        # 创建 rank × dim 个子网络
+        # 如果没有提供子网络, 则创建默认的子网络
+        if subnetworks is None:
+            # 为每个维度创建一个共享的DefaultSubNet实例
+            # 这样同一维度的不同rank会共享参数, 大幅减少参数冗余
+            shared_default_subnets = nn.ModuleList(
+                [DefaultSubNet(self.rank) for _ in range(self.dim)]
+            )
+
+            # 创建一个引用共享DefaultSubNet的子网络类
+            class SharedSingleComponentSubNet(nn.Module):
+                """
+                共享单分量子网络 - 从共享的DefaultSubNet中提取单个分量
+
+                这个类引用共享的DefaultSubNet实例, 从中提取第r个分量,
+                实现参数共享以减少内存占用和提高训练效率.
+                """
+
+                def __init__(
+                    self, shared_subnet: nn.Module, component_index: int
+                ):
+                    super().__init__()
+                    self.shared_subnet = shared_subnet
+                    self.component_index = component_index
+
+                def forward(self, x):
+                    # 获取共享DefaultSubNet的完整输出, 然后提取第component_index个分量
+                    full_output = self.shared_subnet(
+                        x
+                    )  # shape: (batch_size, rank)
+                    return full_output[
+                        :, self.component_index : self.component_index + 1
+                    ]  # shape: (batch_size, 1)
+
+            subnetworks = [
+                [
+                    SubTensorNeuralNetwork(
+                        network=SharedSingleComponentSubNet(
+                            shared_subnet=shared_default_subnets[d],
+                            component_index=r,
+                        ),
+                        boundary_condition=domain_bounds[d]  # 不同维度的边界
+                        if domain_bounds
+                        else None,
+                    )
+                    for d in range(self.dim)
+                ]
+                for r in range(self.rank)
+            ]
+
+            # 将共享的子网络保存为模块属性, 确保参数被正确管理
+            self.shared_default_subnets = shared_default_subnets
+
+        # 验证子网络结构的一致性
+        assert len(subnetworks) == self.rank, (
+            f"传入的子网络rank数量{len(subnetworks)}与指定的rank{self.rank}不匹配"
+        )
+        for r in range(self.rank):
+            assert len(subnetworks[r]) == self.dim, (
+                f"第{r}个rank的子网络数量{len(subnetworks[r])}与指定的dim{self.dim}不匹配"
+            )
+
+        # 直接使用传入的子网络, 同时传入子网络的所有参数
         # subnetworks[r][d] 对应 subtnn_d^{(r)}
         self.subnetworks = nn.ModuleList(
-            [
-                nn.ModuleList(
-                    [
-                        SubTensorNeuralNetwork(
-                            input_dim=1,
-                            output_dim=1,
-                            hidden_dims=hidden_dims,
-                            activation=activation,
-                            use_layer_norm=use_layer_norm,
-                            boundary_condition=domain_bounds[d]
-                            if domain_bounds
-                            else None,
-                        )
-                        for d in range(dim)
-                    ]
-                )
-                for _ in range(rank)
-            ]
+            [nn.ModuleList(subnetworks[r]) for r in range(self.rank)]
         )
 
-        # 可学习的系数θᵣ
-        if use_coefficients:
-            self.theta = nn.Parameter(torch.ones(rank))
-        else:
-            self.register_buffer("theta", torch.ones(rank))
+        # 使用ThetaModule管理系数θᵣ
+        # 设计为module的好处是可以区分要学习的theta参数和TNN中表达式的theta值
+        # 因为在对TNN做运算的时候, 需要学习的是原始的theta, 但表达式的theta会发生改变
+        self.theta_module = self.ThetaModule(self.rank)
+
+    @property
+    def theta(self):
+        """获取系数张量"""
+        # 也可以直接用 self.theta_module() 来表示TNN中theta的值
+        # 但是这样重写一下会更符合数学直观表达, 可以用 self.theta 来表示TNN中theta的值
+        return self.theta_module()
 
     def forward(self, x):
         """
@@ -359,15 +485,14 @@ class TensorNeuralNetwork(nn.Module):
             输出张量, shape为(batch_size, 1)
         """
         batch_size = x.shape[0]
-        device = x.device
 
         # 计算TNN输出
-        result = torch.zeros(batch_size, 1, device=device)
+        result = torch.zeros(batch_size, 1)
 
         # 对每个rank分量r
         for r in range(self.rank):
             # 计算 Π_{d=1}^{dim} subtnn_d^{(r)}(x_d)
-            product = torch.ones(batch_size, 1, device=device)
+            product = torch.ones(batch_size, 1)
 
             for d in range(self.dim):
                 # 提取第d维输入
@@ -416,7 +541,7 @@ class TensorNeuralNetwork(nn.Module):
         1. 创建一个新的TNN, 具有相同的维度和秩结构
         2. 复制原TNN的所有系数θᵣ
         3. 对于梯度维度: 创建导数子网络(使用自动微分)
-        4. 对于其他维度: 直接复制原子网络的参数
+        4. 对于其他维度: 直接引用原子网络
 
         Args:
             grad_dim: 计算梯度的维度索引, 范围为[0, self.dim-1]
@@ -442,52 +567,27 @@ class TensorNeuralNetwork(nn.Module):
             f"grad_dim {grad_dim} 超出有效范围 [0, {self.dim - 1}]"
         )
 
-        # 创建梯度TNN, rank保持不变
-        # 注意: 这里的hidden_dims等参数不会实际使用, 因为我们会直接替换子网络
+        # 构建梯度TNN的子网络结构
+        grad_subnetworks: list[list[SubTensorNeuralNetwork]] = [
+            [
+                self.subnet(r, d).grad()
+                if d == grad_dim
+                else self.subnet(r, d)
+                for d in range(self.dim)
+            ]
+            for r in range(self.rank)
+        ]
+
+        # 使用构造好的子网络直接创建梯度TNN
         grad_tnn = TensorNeuralNetwork(
             dim=self.dim,
             rank=self.rank,
-            hidden_dims=(10,),  # 使用最小配置, 避免不必要的内存分配
-            activation="sin",
+            subnetworks=grad_subnetworks,
             domain_bounds=self.domain_bounds,
-            use_coefficients=True,
-            use_layer_norm=True,
         )
 
-        # 构造梯度TNN的子网络和系数
-        grad_subnetworks = []  # 存储所有rank分量的子网络
-        grad_coefficients = []  # 存储所有rank分量的系数
-
-        for r in range(self.rank):
-            # 复制系数
-            grad_coefficients.append(self.theta[r])
-
-            # 为这个rank分量创建所有维度的子网络
-            rank_subnets = []
-            for d in range(self.dim):
-                if d == grad_dim:
-                    # 对于梯度维度, 创建梯度子网络
-                    derivative_subnet = self.subnet(r, d).grad()
-                    rank_subnets.append(derivative_subnet)
-                else:
-                    # 对于其他维度, 直接引用原子网络
-                    rank_subnets.append(self.subnet(r, d))
-
-            grad_subnetworks.append(rank_subnets)
-
-        # 直接替换子网络结构和系数
-        with torch.no_grad():
-            # 设置系数
-            for idx, coeff in enumerate(grad_coefficients):
-                grad_tnn.theta[idx] = coeff
-
-            # 替换子网络结构
-            grad_tnn.subnetworks = nn.ModuleList(
-                [
-                    nn.ModuleList(rank_subnets)
-                    for rank_subnets in grad_subnetworks
-                ]
-            )
+        # 直接共享系数内存
+        grad_tnn.theta_module = self.theta_module
 
         return grad_tnn
 
@@ -512,9 +612,9 @@ class TensorNeuralNetwork(nn.Module):
         其中前rank1个分量来自第一个TNN, 后rank2个分量来自第二个TNN.
 
         实现策略:
-        1. 创建一个新的TNN骨架结构
+        1. 验证两个TNN的维度和定义域兼容性
         2. 直接引用原始TNN的子网络, 避免参数复制
-        3. 设置正确的系数和网络结构
+        3. 正确拼接系数并处理定义域边界
 
         Args:
             other: 另一个TensorNeuralNetwork实例
@@ -525,6 +625,7 @@ class TensorNeuralNetwork(nn.Module):
         Raises:
             AssertionError: 当两个TNN的维度不匹配时
             TypeError: 当other不是TensorNeuralNetwork实例时
+            ValueError: 当两个TNN的定义域不兼容时
 
         Example:
             >>> tnn1 = TensorNeuralNetwork(dim=2, rank=3)
@@ -541,6 +642,7 @@ class TensorNeuralNetwork(nn.Module):
             - 直接引用原始子网络, 避免参数不匹配问题
             - 支持自动微分和梯度优化
             - 计算复杂度线性增长, 保持高效性
+            - 需要处理定义域兼容性检查
         """
         if not isinstance(other, TensorNeuralNetwork):
             raise TypeError(
@@ -549,52 +651,53 @@ class TensorNeuralNetwork(nn.Module):
 
         assert self.dim == other.dim, "两个TNN的维度必须相同"
 
-        new_rank = self.rank + other.rank
+        # 直接构建加法TNN的所有子网络结构
+        subnetworks: list[list[SubTensorNeuralNetwork]] = [
+            # 前self.rank个分量: 来自self
+            *[
+                [self.subnet(r, d) for d in range(self.dim)]
+                for r in range(self.rank)
+            ],
+            # 后other.rank个分量: 来自other
+            *[
+                [other.subnet(s, d) for d in range(other.dim)]
+                for s in range(other.rank)
+            ],
+        ]
 
-        # 首先收集所有子网络和系数
-        sum_subnetworks = []  # 存储所有rank分量的子网络
-        sum_coefficients = []  # 存储所有rank分量的系数
-
-        # 前rank1个分量: 来自self
-        for r in range(self.rank):
-            sum_coefficients.append(self.theta[r])
-            rank_subnets = []
-            for d in range(self.dim):
-                rank_subnets.append(self.subnet(r, d))
-            sum_subnetworks.append(rank_subnets)
-
-        # 后rank2个分量: 来自other
-        for s in range(other.rank):
-            sum_coefficients.append(other.theta[s])
-            rank_subnets = []
-            for d in range(other.dim):
-                rank_subnets.append(other.subnet(s, d))
-            sum_subnetworks.append(rank_subnets)
-
-        # 创建新的TNN
+        # 使用构造好的子网络直接创建加法TNN
         sum_tnn = TensorNeuralNetwork(
             dim=self.dim,
-            rank=new_rank,
-            hidden_dims=(40, 40),  # 这个参数不会被使用
-            activation="sin",
+            rank=self.rank + other.rank,
+            subnetworks=subnetworks,
             domain_bounds=self.domain_bounds,
-            use_coefficients=True,
-            use_layer_norm=True,
         )
 
-        # 直接替换子网络结构和系数
-        with torch.no_grad():
-            # 设置系数
-            for idx, coeff in enumerate(sum_coefficients):
-                sum_tnn.theta[idx] = coeff
+        # 创建新的theta模块来处理系数拼接
+        class SumThetaModule(nn.Module):
+            """加法TNN的系数模块, 动态拼接两个原始TNN的系数"""
 
-            # 替换子网络结构
-            sum_tnn.subnetworks = nn.ModuleList(
-                [
-                    nn.ModuleList(rank_subnets)
-                    for rank_subnets in sum_subnetworks
-                ]
-            )
+            def __init__(
+                self,
+                theta_module1: "TensorNeuralNetwork.ThetaModule",
+                theta_module2: "TensorNeuralNetwork.ThetaModule",
+            ):
+                super().__init__()
+                self.theta_module1 = theta_module1
+                self.theta_module2 = theta_module2
+
+            def forward(self):
+                """动态拼接两个theta模块的系数"""
+                theta1 = self.theta_module1()
+                theta2 = self.theta_module2()
+
+                # torch.cat会保持输入张量的梯度信息和计算图连接
+                return torch.cat([theta1, theta2], dim=0)
+
+        # 替换sum_tnn的theta_module
+        sum_tnn.theta_module = SumThetaModule(
+            self.theta_module, other.theta_module
+        )
 
         return sum_tnn
 
@@ -634,57 +737,49 @@ class TensorNeuralNetwork(nn.Module):
             - 支持自动微分和梯度优化
             - 计算复杂度不变, 保持高效性
         """
-        # 类型检查和转换
-        if isinstance(scalar, int | float):
-            scalar = torch.tensor(float(scalar))
-        elif isinstance(scalar, torch.Tensor):
-            if scalar.numel() != 1:
-                raise TypeError("标量乘法只支持单元素张量")
-            scalar = scalar.item()
-            scalar = torch.tensor(float(scalar))
-        else:
+        # 类型检查
+        if not isinstance(scalar, int | float | torch.Tensor):
             raise TypeError(
                 f"不支持TensorNeuralNetwork与{type(scalar)}的乘法操作"
             )
 
-        # 创建新的TNN
+        # 张量类型检查
+        if isinstance(scalar, torch.Tensor) and scalar.numel() != 1:
+            raise TypeError("标量乘法只支持单元素张量")
+
+        # 直接引用原始TNN的所有子网络结构
+        subnetworks: list[list[SubTensorNeuralNetwork]] = [
+            [self.subnet(r, d) for d in range(self.dim)]
+            for r in range(self.rank)
+        ]
+
+        # 使用构造好的子网络直接创建乘法TNN
         scaled_tnn = TensorNeuralNetwork(
             dim=self.dim,
             rank=self.rank,
-            hidden_dims=(40, 40),  # 这个参数不会被使用
-            activation="sin",
+            subnetworks=subnetworks,
             domain_bounds=self.domain_bounds,
-            use_coefficients=True,
-            use_layer_norm=True,
         )
 
-        # 收集缩放后的系数和原始子网络
-        scaled_coefficients = []
-        scaled_subnetworks = []
+        # 创建一个新的ScaledThetaModule类来处理标量乘法
+        class ScaledThetaModule(nn.Module):
+            """标量乘法的ThetaModule"""
 
-        for r in range(self.rank):
-            # 缩放系数
-            scaled_coefficients.append(self.theta[r] * scalar)
+            def __init__(
+                self,
+                original_theta_module: "TensorNeuralNetwork.ThetaModule",
+                scalar,
+            ):
+                super().__init__()
+                self.original_theta_module = original_theta_module
+                self.scalar = scalar
 
-            # 直接引用原子网络
-            rank_subnets = []
-            for d in range(self.dim):
-                rank_subnets.append(self.subnet(r, d))
-            scaled_subnetworks.append(rank_subnets)
+            def forward(self):
+                """返回原系数乘以标量"""
+                return self.original_theta_module() * self.scalar
 
-        # 直接替换子网络结构和系数
-        with torch.no_grad():
-            # 设置缩放后的系数
-            for idx, coeff in enumerate(scaled_coefficients):
-                scaled_tnn.theta[idx] = coeff
-
-            # 替换子网络结构
-            scaled_tnn.subnetworks = nn.ModuleList(
-                [
-                    nn.ModuleList(rank_subnets)
-                    for rank_subnets in scaled_subnetworks
-                ]
-            )
+        # 使用ScaledThetaModule替换原来的theta_module
+        scaled_tnn.theta_module = ScaledThetaModule(self.theta_module, scalar)
 
         return scaled_tnn
 
@@ -831,53 +926,27 @@ class TensorNeuralNetwork(nn.Module):
         # 验证函数是否为一维函数
         self._validate_1d_function(func)
 
-        # 创建新的TNN
+        # 构建结果TNN的子网络结构
+        result_subnetworks: list[list[SubTensorNeuralNetwork]] = [
+            [
+                self.subnet(r, d).multiply_by_function(func)
+                if d == target_dim
+                else self.subnet(r, d)
+                for d in range(self.dim)
+            ]
+            for r in range(self.rank)
+        ]
+
+        # 使用构造好的子网络直接创建结果TNN
         result_tnn = TensorNeuralNetwork(
             dim=self.dim,
             rank=self.rank,
-            hidden_dims=(10,),  # 使用最小配置, 避免不必要的内存分配
-            activation="sin",
+            subnetworks=result_subnetworks,
             domain_bounds=self.domain_bounds,
-            use_coefficients=True,
-            use_layer_norm=True,
         )
 
-        # 构造新TNN的子网络和系数
-        result_subnetworks = []  # 存储所有rank分量的子网络
-        result_coefficients = []  # 存储所有rank分量的系数
-
-        for r in range(self.rank):
-            # 复制系数
-            result_coefficients.append(self.theta[r])
-
-            # 为这个rank分量创建所有维度的子网络
-            rank_subnets = []
-            for d in range(self.dim):
-                if d == target_dim:
-                    # 对于目标维度, 创建函数乘积子网络
-                    function_product_subnet = self.subnet(
-                        r, d
-                    ).multiply_by_function(func)
-                    rank_subnets.append(function_product_subnet)
-                else:
-                    # 对于其他维度, 直接引用原子网络
-                    rank_subnets.append(self.subnet(r, d))
-
-            result_subnetworks.append(rank_subnets)
-
-        # 直接替换子网络结构和系数
-        with torch.no_grad():
-            # 设置系数
-            for idx, coeff in enumerate(result_coefficients):
-                result_tnn.theta[idx] = coeff
-
-            # 替换子网络结构
-            result_tnn.subnetworks = nn.ModuleList(
-                [
-                    nn.ModuleList(rank_subnets)
-                    for rank_subnets in result_subnetworks
-                ]
-            )
+        # 直接共享系数内存
+        result_tnn.theta_module = self.theta_module
 
         return result_tnn
 
@@ -933,6 +1002,119 @@ class TensorNeuralNetwork(nn.Module):
                     f"请确保函数是一维函数 (R → R) 且支持torch张量计算"
                 ) from e
 
+    def __matmul__(
+        self, other: "TensorNeuralNetwork"
+    ) -> "TensorNeuralNetwork":
+        """
+        重载矩阵乘法操作符, 实现两个TNN的乘积: tnn1 @ tnn2
+
+        这个方法允许使用 tnn1 @ tnn2 的语法来创建两个TNN的乘积.
+        利用张量分解的乘积性质, 两个TNN的乘积仍然保持张量积的结构.
+
+        数学原理:
+        对于两个TNN:
+        u1(x) = Σ_{r=1}^{rank1} α_r Π_{d=1}^{dim} f_d^{(r)}(x_d)
+        u2(x) = Σ_{s=1}^{rank2} β_s Π_{d=1}^{dim} g_d^{(s)}(x_d)
+
+        它们的乘积为:
+        u1(x) × u2(x) = (Σᵣ α_r Πᵈ f_d^{(r)}(x_d)) × (Σₛ β_s Πᵈ g_d^{(s)}(x_d))
+                      = Σᵣₛ α_r β_s Πᵈ (f_d^{(r)}(x_d) × g_d^{(s)}(x_d))
+
+        新的TNN有 rank1 × rank2 个rank分量
+
+        Args:
+            other: 另一个TensorNeuralNetwork实例
+
+        Returns:
+            TensorNeuralNetwork: 新的TNN实例, 表示两个TNN的乘积
+
+        Raises:
+            AssertionError: 当两个TNN的维度不匹配时
+            TypeError: 当other不是TensorNeuralNetwork实例时
+
+        Example:
+            >>> tnn1 = TensorNeuralNetwork(dim=2, rank=3)
+            >>> tnn2 = TensorNeuralNetwork(dim=2, rank=2)
+            >>> product_tnn = tnn1 @ tnn2  # 使用@操作符
+            >>> print(product_tnn.rank)  # 输出: 6 (3*2)
+
+        Note:
+            - 新TNN的维度与输入TNN相同
+            - 新TNN的rank等于两个输入TNN的rank的乘积
+            - 每个维度的子网络是两个原始子网络的乘积
+            - 支持自动微分和梯度优化
+            - 计算复杂度为O(rank1 * rank2 * dim)
+        """
+        # 类型检查
+        if not isinstance(other, TensorNeuralNetwork):
+            raise TypeError(
+                f"不支持TensorNeuralNetwork与{type(other)}的矩阵乘法操作"
+            )
+
+        # 维度检查
+        assert self.dim == other.dim, "两个TNN的维度必须相同"
+
+        new_rank = self.rank * other.rank
+
+        # 构建所有rank分量的乘积子网络
+        # 对于每个(r,s)组合, 创建一个rank分量, 包含所有维度的乘积子网络
+        product_subnetworks: list[list[SubTensorNeuralNetwork]] = [
+            [
+                self.subnet(r, d).multiply_by_subnet(other.subnet(s, d))
+                for d in range(self.dim)
+            ]
+            for r in range(self.rank)
+            for s in range(other.rank)
+        ]
+
+        # 使用构造好的子网络直接创建乘积TNN
+        product_tnn = TensorNeuralNetwork(
+            dim=self.dim,
+            rank=new_rank,
+            subnetworks=product_subnetworks,
+            domain_bounds=self.domain_bounds,
+        )
+
+        # 创建新的theta模块来处理系数乘积
+        class ProductThetaModule(nn.Module):
+            """乘积TNN的系数模块, 动态计算两个原始TNN系数的乘积"""
+
+            def __init__(
+                self,
+                theta_module1: "TensorNeuralNetwork.ThetaModule",
+                theta_module2: "TensorNeuralNetwork.ThetaModule",
+            ):
+                super().__init__()
+                self.theta_module1 = theta_module1
+                self.theta_module2 = theta_module2
+
+            def forward(self):
+                """动态计算乘积系数"""
+                theta1 = self.theta_module1()
+                theta2 = self.theta_module2()
+
+                rank1 = theta1.shape[0]
+                rank2 = theta2.shape[0]
+
+                # 计算所有系数乘积组合
+                product_coeffs = [
+                    theta1[r] * theta2[s]
+                    for r in range(rank1)
+                    for s in range(rank2)
+                ]
+
+                # 使用torch.stack()将标量张量列表转换为一维张量
+                # 必须用stack而不是torch.tensor(), 因为product_coeffs中的每个元素
+                # 都是标量张量(有梯度信息), torch.stack()能保持梯度连接和自动微分功能
+                return torch.stack(product_coeffs)
+
+        # 替换product_tnn的theta_module
+        product_tnn.theta_module = ProductThetaModule(
+            self.theta_module, other.theta_module
+        )
+
+        return product_tnn
+
 
 # %%
 class TNNIntegrator(nn.Module):
@@ -973,8 +1155,7 @@ class TNNIntegrator(nn.Module):
 
     Attributes:
         n_quad_points: 积分节点数
-        points: 标准区间[-1,1]上的高斯-勒让德积分点
-        weights: 对应的积分权重
+        gaussian_quadrature: 内部高斯积分器实例
 
     Note:
         - 继承自nn.Module以支持GPU计算和自动微分
@@ -982,27 +1163,73 @@ class TNNIntegrator(nn.Module):
         - 对于特征值问题和PDE求解, 通常提供足够的精度
     """
 
+    class GaussianQuadrature(nn.Module):
+        """
+        高斯-勒让德积分器 - TNNIntegrator的内部类
+
+        专门用于处理高斯-勒让德积分的计算, 包括积分点的生成、区间变换和权重计算.
+        这个类封装了所有与高斯积分相关的底层操作.
+
+        数学原理:
+        高斯-勒让德积分公式:
+        ∫_{-1}^{1} f(x) dx ≈ Σ_{i=1}^{n} w_i f(x_i)
+
+        其中x_i是勒让德多项式的根, w_i是对应的权重.
+        对于任意区间[a,b], 通过变量替换:
+        ∫_{a}^{b} f(x) dx = (b-a)/2 * ∫_{-1}^{1} f((b-a)/2 * t + (b+a)/2) dt
+
+        Args:
+            n_quad_points: 高斯-勒让德积分的节点数
+
+        Attributes:
+            n_quad_points: 积分节点数
+            points: 标准区间[-1,1]上的高斯-勒让德积分点
+            weights: 对应的积分权重
+        """
+
+        def __init__(self, n_quad_points: int = 16):
+            super().__init__()
+            self.n_quad_points = n_quad_points
+            # 获取高斯-勒让德积分点和权重
+            self.points, self.weights = self._get_gauss_legendre_points(
+                n_quad_points
+            )
+
+        def _get_gauss_legendre_points(self, n):
+            """获取标准区间[-1,1]上的高斯-勒让德积分点和权重"""
+            points, weights = np.polynomial.legendre.leggauss(n)
+            return torch.tensor(points, dtype=torch.float32), torch.tensor(
+                weights, dtype=torch.float32
+            )
+
+        def transform_to_interval(self, a: float, b: float):
+            """
+            将积分点从[-1,1]变换到[a,b]
+
+            通过线性变换将标准区间[-1,1]上的积分点和权重变换到任意区间[a,b].
+            变换公式:
+            x = (b-a)/2 * t + (b+a)/2
+            dx = (b-a)/2 * dt
+
+            Args:
+                a: 积分区间下界
+                b: 积分区间上界
+
+            Returns:
+                tuple: (transformed_points, transformed_weights)
+                    - transformed_points: 变换后的积分点
+                    - transformed_weights: 变换后的积分权重
+            """
+            # x = (b-a)/2 * t + (b+a)/2, dx = (b-a)/2 * dt
+            transformed_points = (b - a) / 2 * self.points + (b + a) / 2
+            transformed_weights = (b - a) / 2 * self.weights
+            return transformed_points, transformed_weights
+
     def __init__(self, n_quad_points: int = 16):
         super().__init__()
         self.n_quad_points = n_quad_points
-        # 获取高斯-勒让德积分点和权重
-        self.points, self.weights = self._get_gauss_legendre_points(
-            n_quad_points
-        )
-
-    def _get_gauss_legendre_points(self, n):
-        """获取标准区间[-1,1]上的高斯-勒让德积分点和权重"""
-        points, weights = np.polynomial.legendre.leggauss(n)
-        return torch.tensor(points, dtype=torch.float32), torch.tensor(
-            weights, dtype=torch.float32
-        )
-
-    def _transform_to_interval(self, a: float, b: float):
-        """将积分点从[-1,1]变换到[a,b]"""
-        # x = (b-a)/2 * t + (b+a)/2, dx = (b-a)/2 * dt
-        transformed_points = (b - a) / 2 * self.points + (b + a) / 2
-        transformed_weights = (b - a) / 2 * self.weights
-        return transformed_points, transformed_weights
+        # 创建内部高斯积分器
+        self.gaussian_quadrature = self.GaussianQuadrature(n_quad_points)
 
     def tnn_int1(
         self,
@@ -1016,33 +1243,41 @@ class TNNIntegrator(nn.Module):
         对于TNN: u(x) = Σ_{r=1}^{rank} θᵣ Π_{d=1}^{dim} subtnn_d^{(r)}(x_d)
 
         积分: ∫ u(x) dx = Σ_{r=1}^{rank} θᵣ Π_{d=1}^{dim} (∫ subtnn_d^{(r)}(x_d) dx_d)
+
+        优化策略:
+        1. 向量化计算减少循环开销
+        2. 预计算积分点和权重避免重复计算
+        3. 使用矩阵运算提高计算效率
+        4. 优化内存使用模式
         """
-        # 为每个rank和每个维度计算1维积分
-        integral_matrix_1d = torch.zeros(tnn.rank, tnn.dim)
+        # 预计算所有维度的积分点和权重, 避免重复计算
+        transformed_quad_data = [
+            self.gaussian_quadrature.transform_to_interval(a_d, b_d)
+            for a_d, b_d in domain_bounds
+        ]
 
-        for r in range(tnn.rank):
-            for d in range(tnn.dim):
-                a_d, b_d = domain_bounds[d]
-                pts, wts = self._transform_to_interval(a_d, b_d)
-
-                # 将积分点扩展为batch
-                x_d = pts.unsqueeze(1)  # shape: (n_points, 1)
-
-                # 获取第r个rank的第d个子网络
-                subnet = tnn.subnet(r, d)
-
-                # 计算1维积分
-                integral_matrix_1d[r, d] = torch.sum(
-                    wts * subnet(x_d).squeeze()
+        # 向量化计算所有rank和维度的一维积分
+        # 使用列表推导式和torch.stack进行批量计算
+        integral_matrix_1d = torch.stack(
+            [
+                torch.stack(
+                    [
+                        torch.sum(
+                            wts * tnn.subnet(r, d)(pts.unsqueeze(1)).squeeze()
+                        )
+                        for d, (pts, wts) in enumerate(transformed_quad_data)
+                    ]
                 )
+                for r in range(tnn.rank)
+            ]
+        )
 
-        # 计算总积分: 对每个rank, 计算所有维度积分的乘积, 然后求和
-        total_integral = torch.tensor(0.0, requires_grad=True)
-        for r in range(tnn.rank):
-            dimensional_integral_product = torch.prod(integral_matrix_1d[r, :])
-            total_integral = (
-                total_integral + tnn.theta[r] * dimensional_integral_product
-            )
+        # 计算每个rank的维度积分乘积: shape (rank,)
+        dimensional_products = torch.prod(integral_matrix_1d, dim=1)
+
+        # 获取系数向量并计算最终积分
+        theta_coeffs = tnn.theta_module()
+        total_integral = torch.sum(theta_coeffs * dimensional_products)
 
         return total_integral
 
@@ -1055,656 +1290,19 @@ class TNNIntegrator(nn.Module):
         """
         两个TNN乘积的积分计算
 
-        1. 使用 _product_tnn 将两个TNN的乘积转换为一个新的TNN
-        2. 使用 tnn_int1 计算新TNN的积分
+        利用TNN的@操作符直接计算两个TNN乘积的积分:
+        ∫ (tnn1 @ tnn2) dx
+
+        Args:
+            tnn1: 第一个TNN
+            tnn2: 第二个TNN
+            domain_bounds: 积分域边界
+
+        Returns:
+            两个TNN乘积的积分值
         """
-        # 创建乘积TNN
-        product_tnn = self._product_tnn(tnn1, tnn2)
+        # 使用TNN的@操作符创建乘积TNN
+        product_tnn = tnn1 @ tnn2
 
         # 使用tnn_int1计算乘积TNN的积分
         return self.tnn_int1(product_tnn, domain_bounds)
-
-    def _product_tnn(
-        self, tnn1: TensorNeuralNetwork, tnn2: TensorNeuralNetwork
-    ) -> TensorNeuralNetwork:
-        """
-        创建两个TNN乘积的TNN表示
-
-        u1(x) × u2(x) = (Σᵣ α_r Πᵈ f_d^{(r)}(x_d)) × (Σₛ β_s Πᵈ g_d^{(s)}(x_d))
-                      = Σᵣₛ α_r β_s Πᵈ (f_d^{(r)}(x_d) × g_d^{(s)}(x_d))
-
-        新的TNN有 rank1 × rank2 个rank分量
-        """
-        assert tnn1.dim == tnn2.dim, "两个TNN的维度必须相同"
-
-        new_rank = tnn1.rank * tnn2.rank
-
-        # 首先收集所有乘积子网络
-        product_subnetworks = []  # 存储所有rank分量的子网络, 长度为 new_rank
-        product_coefficients = []  # 存储所有rank分量的系数, 长度为 new_rank
-
-        for r in range(tnn1.rank):
-            for s in range(tnn2.rank):
-                # 计算系数
-                coeff = tnn1.theta[r] * tnn2.theta[s]
-                product_coefficients.append(coeff)
-
-                # 为这个rank分量创建所有维度的乘积子网络
-                rank_subnets = []  # 长度为 tnn1.dim, 存储当前rank分量在各维度的乘积子网络
-                for d in range(tnn1.dim):
-                    subnet = self._product_subnet(
-                        subnet1=tnn1.subnet(r, d),
-                        subnet2=tnn2.subnet(s, d),
-                    )
-                    rank_subnets.append(subnet)
-
-                product_subnetworks.append(rank_subnets)
-
-        # 创建新的TNN
-        tnn = TensorNeuralNetwork(
-            dim=tnn1.dim,
-            rank=new_rank,
-            hidden_dims=(40, 40),
-            activation="sin",
-            domain_bounds=tnn1.domain_bounds,
-            use_coefficients=True,
-            use_layer_norm=True,
-        )
-
-        # 替换子网络和系数
-        with torch.no_grad():
-            # 设置系数
-            for idx, coeff in enumerate(product_coefficients):
-                tnn.theta[idx] = coeff
-
-            # 替换子网络结构
-            tnn.subnetworks = nn.ModuleList(
-                [
-                    nn.ModuleList(rank_subnets)
-                    for rank_subnets in product_subnetworks
-                ]
-            )
-
-        return tnn
-
-    def _product_subnet(
-        self,
-        subnet1: SubTensorNeuralNetwork,
-        subnet2: SubTensorNeuralNetwork,
-    ) -> SubTensorNeuralNetwork:
-        """
-        创建两个子网络乘积的子网络
-
-        将两个子网络的输出进行逐元素乘法, 生成一个新的乘积子网络.
-        这是实现TNN乘积运算的核心组件.
-
-        数学表示: h(x) = f(x) * g(x)
-        其中f和g分别是subnet1和subnet2的输出函数
-
-        Args:
-            subnet1: 第一个子网络, 提供乘法运算的第一个操作数
-            subnet2: 第二个子网络, 提供乘法运算的第二个操作数
-
-        Returns:
-            SubTensorNeuralNetwork: 新的乘积子网络, 计算两个输入子网络的乘积
-
-        注意:
-            - 返回的是一个全新的子网络对象
-            - 计算过程保持自动微分的兼容性
-        """
-
-        class ProductSubTensorNeuralNetwork(SubTensorNeuralNetwork):
-            """乘积子网络的特殊实现"""
-
-            def __init__(
-                self,
-                subnet1: SubTensorNeuralNetwork,
-                subnet2: SubTensorNeuralNetwork,
-            ):
-                # 继承第一个子网络的基本配置
-                super().__init__(
-                    input_dim=1,
-                    output_dim=1,
-                    hidden_dims=(1,),  # 最小配置, 因为我们会重写forward
-                    activation="sin",
-                    use_layer_norm=False,
-                    boundary_condition=subnet1.boundary_condition,
-                )
-
-                # 保存原始子网络的引用
-                self.subnet1 = subnet1
-                self.subnet2 = subnet2
-
-            # 重写forward
-            def forward(self, x):
-                """计算两个子网络输出的乘积"""
-                y1 = self.subnet1(x)
-                y2 = self.subnet2(x)
-                return y1 * y2
-
-        # 返回新的乘积子网络
-        return ProductSubTensorNeuralNetwork(subnet1, subnet2)
-
-
-# %%
-class TNNRayleighQuotientCalculator:
-    """
-    基于TNN的Rayleigh商计算器
-
-    这个类专门用于计算TNN函数的Rayleigh商, 主要应用于特征值问题的变分求解.
-    通过利用TNN的张量积结构, 可以高效地计算高维函数的Rayleigh商积分.
-
-    数学背景:
-    Rayleigh商定义为: R[u] = (∫|∇u|² dx + ∫V(x)|u|² dx) / (∫|u|² dx)
-
-    其中:
-    - ∇u是函数u的梯度
-    - V(x)是可选的势函数
-    - 积分在给定域Ω上进行
-
-    核心功能:
-    1. 计算动能项: ∫|∇u|² dx (梯度平方的积分)
-    2. 计算势能项: ∫V(x)|u|² dx (势函数与函数平方的积分)
-    3. 计算归一化项: ∫|u|² dx (函数平方的积分)
-    4. 组合得到完整的Rayleigh商
-
-    算法优势:
-    - 利用TNN的张量积分解避免高维积分的维数灾难
-    - 支持自动微分, 可用于梯度优化
-    - 高精度的数值积分方法
-    - 支持任意维度的问题
-
-    Args:
-        tnn: TensorNeuralNetwork实例, 待计算Rayleigh商的函数
-        potential_func: 势函数V(x), 如果为None则忽略势能项
-        n_quad_points: 数值积分的高斯求积点数, 影响积分精度
-
-    Attributes:
-        tnn: 存储的TNN实例
-        potential_func: 势函数
-        integrator: TNNIntegrator实例, 用于执行张量积分
-    """
-
-    def __init__(
-        self,
-        tnn: TensorNeuralNetwork,
-        potential_func=None,
-        n_quad_points: int = 16,
-    ):
-        self.tnn = tnn
-        self.potential_func = potential_func
-        self.integrator = TNNIntegrator(n_quad_points)
-
-    def gradient_squared_integral(
-        self,
-        tnn: TensorNeuralNetwork,
-        domain_bounds: list[tuple[float, float]],
-    ):
-        """
-        计算梯度的L²范数积分: ∫|∇u|² dx
-
-        这个方法计算TNN函数u(x)的梯度平方在给定域上的积分.
-
-        数学原理:
-        梯度的平方范数定义为: |∇u|² = Σᵢ (∂u/∂xᵢ)²
-        因此积分可以分解为: ∫|∇u|² dx = Σᵢ ∫(∂u/∂xᵢ)² dx
-
-        算法步骤:
-        1. 对每个空间维度i, 创建梯度分量的TNN表示: ∂u/∂xᵢ
-        2. 使用tnn_int2方法计算每个梯度分量的平方积分: ∫(∂u/∂xᵢ)² dx
-        3. 将所有维度的贡献求和得到最终结果
-
-        Args:
-            tnn: 待计算梯度积分的TensorNeuralNetwork实例
-            domain_bounds: 积分域的边界, 格式为[(a₁,b₁), (a₂,b₂), ..., (aₙ,bₙ)]
-
-        Returns:
-            torch.Tensor: 标量张量, 表示∫|∇u|²dx的数值结果, 支持自动微分
-
-        Note:
-            - 返回值始终为非负数
-            - 计算涉及自动微分, 可能比u²积分稍慢
-            - 对于特征值问题, 这个积分与最小特征值直接相关
-        """
-        total_integral = torch.tensor(0.0, requires_grad=True)
-
-        for i in range(tnn.dim):
-            # 创建第i个梯度分量的TNN
-            grad_i_tnn = tnn.grad(i)
-
-            # 计算 (∂u/∂xᵢ)² 的积分, 使用新的tnn_int2方法
-            grad_i_squared_integral = self.integrator.tnn_int2(
-                grad_i_tnn, grad_i_tnn, domain_bounds
-            )
-
-            total_integral = total_integral + grad_i_squared_integral
-
-        return total_integral
-
-    def rayleigh_quotient(self, domain_bounds: list[tuple[float, float]]):
-        """
-        使用张量分解方式计算Rayleigh商
-
-        这个方法是特征值求解的核心, 通过计算Rayleigh商来评估当前TNN函数的"特征值".
-        Rayleigh商提供了特征值的上界估计, 通过最小化这个商可以逼近真实的最小特征值.
-
-        数学公式:
-        R[u] = (∫|∇u|² dx + ∫V(x)|u|² dx) / (∫|u|² dx)
-
-        计算步骤:
-        1. 动能项: 使用gradient_squared_integral计算∫|∇u|² dx
-        2. 势能项: 计算∫V(x)|u|² dx (当前版本暂未实现)
-        3. 归一化项: 使用tnn_int2计算∫|u|² dx
-        4. 组合得到Rayleigh商
-
-        Args:
-            domain_bounds: 积分域的边界, 格式为[(a₁,b₁), (a₂,b₂), ..., (aₙ,bₙ)]
-
-        Returns:
-            torch.Tensor: Rayleigh商的数值, 支持自动微分用于梯度优化
-
-        Note:
-            - 返回值越小, 对应的特征值估计越准确
-            - 分母添加小的正则化项1e-8防止除零
-            - 当前版本的势能项设为0, 适用于纯拉普拉斯特征值问题
-        """
-
-        # 计算动能项: ∫|∇u|² dx
-        kinetic_term = self.gradient_squared_integral(self.tnn, domain_bounds)
-
-        # 计算势能项: ∫V|u|² dx (暂时忽略势能, 设为0)
-        potential_term = 0.0
-        if self.potential_func is not None:
-            # 如果有势能, 需要额外处理
-            # 这里简化为0, 实际应用中需要扩展
-            potential_term = 0.0
-
-        # 计算归一化项: ∫|u|² dx
-        normalization_term = self.integrator.tnn_int2(
-            self.tnn, self.tnn, domain_bounds
-        )
-
-        # 计算Rayleigh商
-        rayleigh_quotient = (kinetic_term + potential_term) / (
-            normalization_term + 1e-8
-        )
-
-        return rayleigh_quotient
-
-
-# %%
-def laplacian_eigenvalue_problem():
-    """
-    求解高维拉普拉斯特征值问题
-
-    本函数演示如何使用张量神经网络求解高维拉普拉斯特征值问题.
-
-    问题描述:
-        求解偏微分方程: -Δu = λu 在域 Ω = [0,1]^d 上
-        边界条件: u|∂Ω = 0 (齐次Dirichlet边界条件)
-        目标: 寻找最小特征值 λ 和对应的特征函数 u
-
-    理论解:
-        对于d维单位超立方体上的拉普拉斯算子, 最小特征值为:
-        λ_min = d * π²
-
-    为什么使用Rayleigh商方法:
-        Rayleigh商是求解特征值问题的经典变分方法, 具有以下重要性质:
-
-        1. 变分原理: 对于自伴算子-Δ, Rayleigh商 R[u] = (u, -Δu)/(u, u)
-           提供了最小特征值的上界估计. 根据变分原理:
-           λ_min = min_{u≠0} R[u] = min_{u≠0} ∫|∇u|²dx / ∫|u|²dx
-
-        2. 优化友好: Rayleigh商是关于函数u的连续泛函, 可以通过梯度下降等
-           优化算法进行最小化, 非常适合神经网络的训练框架
-
-        3. 边界条件自然满足: 通过构造满足齐次Dirichlet边界条件的TNN,
-           Rayleigh商的最小化自动在正确的函数空间中进行
-
-        4. 数值稳定性: 相比直接求解特征值方程, Rayleigh商方法避免了
-           微分算子的直接离散化, 减少了数值误差的累积
-
-        5. 高维适应性: 传统有限元方法在高维问题中面临维数灾难,
-           而基于TNN的Rayleigh商方法通过张量分解有效缓解了这一问题
-
-    计算方法:
-        1. 构造满足边界条件的张量神经网络
-        2. 使用Rayleigh商方法逼近特征值: R[u] = ∫|∇u|²dx / ∫|u|²dx
-        3. 通过三阶段优化策略最小化Rayleigh商以逼近最小特征值
-
-    Returns:
-        None: 函数执行完毕后打印结果, 不返回值
-
-    Note:
-        - 使用正弦激活函数以更好地逼近特征函数的振荡性质
-        - 采用层归一化和系数缩放提高训练稳定性
-        - 优化过程分为Adam快速下降, LBFGS精细优化和最终微调三个阶段
-    """
-    dim = 5  # 维度
-    rank = 15  # 张量秩
-
-    print(f"=== {dim} 维拉普拉斯特征值问题 ===")
-    print(f"张量秩: {rank}")
-    print(f"子网络总数: {rank * dim}")
-
-    # 定义域边界
-    domain_bounds = [(0.0, 1.0) for _ in range(dim)]
-
-    # 创建重构的TNN
-    tnn = TensorNeuralNetwork(
-        dim=dim,
-        rank=rank,
-        hidden_dims=(40, 40),
-        activation="sin",
-        domain_bounds=domain_bounds,
-        use_coefficients=True,
-        use_layer_norm=True,
-    )
-
-    print(f"TNN参数总数: {sum(p.numel() for p in tnn.parameters())}")
-
-    # 使用TNN Rayleigh商计算器
-    solver = TNNRayleighQuotientCalculator(
-        tnn, potential_func=None, n_quad_points=8
-    )
-
-    theoretical_eigenvalue = dim * math.pi**2
-    print(f"理论最小特征值: {theoretical_eigenvalue:.6f}")
-
-    # ================== 三阶段优化 ==================
-
-    losses = []
-
-    # 阶段1: Adam快速下降 (5个epoch)
-    print("=== 阶段1: Adam 快速下降 ===")
-    optimizer1 = optim.Adam(tnn.parameters(), lr=0.001)
-
-    for epoch in range(5):
-        optimizer1.zero_grad()
-        loss = solver.rayleigh_quotient(domain_bounds)
-        loss.backward()
-        optimizer1.step()
-
-        losses.append(loss.item())
-        relative_error = (
-            abs(loss.item() - theoretical_eigenvalue)
-            / theoretical_eigenvalue
-            * 100
-        )
-        print(
-            f"Epoch {epoch}, 特征值: {loss.item():.6f}, 相对误差: {relative_error:.3f}%"
-        )
-
-    # 阶段2: Adam精细调优 (10个epoch)
-    print("\n=== 阶段2: Adam 精细调优 ===")
-    optimizer2 = optim.Adam(tnn.parameters(), lr=0.0001)  # 更小的学习率
-
-    for epoch in range(10):
-        optimizer2.zero_grad()
-        loss = solver.rayleigh_quotient(domain_bounds)
-        loss.backward()
-        optimizer2.step()
-
-        losses.append(loss.item())
-        relative_error = (
-            abs(loss.item() - theoretical_eigenvalue)
-            / theoretical_eigenvalue
-            * 100
-        )
-        print(
-            f"Epoch {5 + epoch}, 特征值: {loss.item():.6f}, 相对误差: {relative_error:.3f}%"
-        )
-
-    # 阶段3: LBFGS精确求解 (5个epoch)
-    print("\n=== 阶段3: LBFGS 精确求解 ===")
-    optimizer3 = optim.LBFGS(tnn.parameters(), lr=1.0)
-
-    for epoch in range(5):
-
-        def closure():
-            optimizer3.zero_grad()
-            loss = solver.rayleigh_quotient(domain_bounds)
-            loss.backward()
-            return loss.item()
-
-        loss = optimizer3.step(closure)
-        losses.append(loss.item() if isinstance(loss, torch.Tensor) else loss)
-
-        current_loss = losses[-1]
-        relative_error = (
-            abs(current_loss - theoretical_eigenvalue)
-            / theoretical_eigenvalue
-            * 100
-        )
-        print(
-            f"Epoch {15 + epoch}, 特征值: {current_loss:.8f}, 相对误差: {relative_error:.4f}%"
-        )
-
-    # ================== 结果总结 ==================
-    final_eigenvalue = losses[-1]
-    final_error = (
-        abs(final_eigenvalue - theoretical_eigenvalue)
-        / theoretical_eigenvalue
-        * 100
-    )
-
-    print(f"\n{'=' * 50}")
-    print("优化完成!")
-    print(f"理论特征值: {theoretical_eigenvalue:.8f}")
-    print(f"最终特征值: {final_eigenvalue:.8f}")
-    print(f"最终相对误差: {final_error:.4f}%")
-    print(f"总训练轮数: {len(losses)}")
-
-    # 分析收敛过程
-    print("\n收敛分析:")
-    print(f"阶段1 (Adam快速): {losses[0]:.6f} -> {losses[4]:.6f}")
-    print(f"阶段2 (Adam精细): {losses[4]:.6f} -> {losses[14]:.6f}")
-    print(f"阶段3 (LBFGS): {losses[14]:.6f} -> {losses[-1]:.8f}")
-
-    return tnn, losses
-
-
-# %%
-def mixed_derivative_eigenvalue_problem():
-    """
-    求解带混合导数的二元函数特征值问题
-
-    问题描述:
-        计算损失函数: ||-Du(x,y) + V₁(x)u(x,y) + V₂(y)u(x,y) - λu(x,y)||²₂
-
-        其中:
-        - D = ∂²/∂x² + 2∂²/∂x∂y + ∂²/∂y² (混合导数算子)
-        - V₁(x) = sin(2πx)
-        - V₂(y) = sin(√2πy)
-        - λ 是特征值参数
-
-    使用张量神经网络逼近解函数u(x,y), 并通过最小化损失函数来求解
-    """
-
-    # ruff: noqa: N802, N806
-    print("=== 二元函数混合导数特征值问题 ===")
-
-    # 问题设置
-    dim = 2  # 二维问题
-    rank = 5  # 张量秩
-    lambda_val = 20.0  # 特征值参数, 可调整
-
-    # 定义域边界 [0,1] × [0,1]
-    domain_bounds = [(0.0, 1.0), (0.0, 1.0)]
-
-    # 创建TNN
-    tnn = TensorNeuralNetwork(
-        dim=dim,
-        rank=rank,
-        hidden_dims=(20, 20),
-        activation="sin",
-        domain_bounds=domain_bounds,
-        use_coefficients=True,
-        use_layer_norm=True,
-    )
-
-    print(f"TNN参数总数: {sum(p.numel() for p in tnn.parameters())}")
-    print(f"张量秩: {rank}")
-    print(f"特征值λ: {lambda_val}")
-
-    # 定义势函数
-    def V1_func(x):
-        """V₁(x) = sin(2πx)"""
-        return torch.sin(2 * math.pi * x)
-
-    def V2_func(y):
-        """V₂(y) = sin(√2πy)"""
-        return torch.sin(torch.sqrt(torch.tensor(2 * math.pi)) * y)
-
-    # 创建积分器
-    integrator = TNNIntegrator(n_quad_points=16)
-
-    def compute_loss_function():
-        """
-        计算损失函数: ||-Du + V₁u + V₂u - λu||²₂
-
-        步骤:
-        1. 计算D*u = ∂²u/∂x² + 2∂²u/∂x∂y + ∂²u/∂y²
-        2. 计算V₁(x)*u(x,y)和V₂(y)*u(x,y)
-        3. 组合得到: operator_u = -D*u + V₁*u + V₂*u - λ*u
-        4. 计算L²范数: ∫∫ |operator_u|² dx dy
-        """
-
-        # 计算各阶导数的TNN表示
-        # u_x = tnn.grad(0)  # ∂u/∂x
-        # u_y = tnn.grad(1)  # ∂u/∂y
-        u_xx = tnn.grad(0).grad(0)  # ∂²u/∂x²
-        u_yy = tnn.grad(1).grad(1)  # ∂²u/∂y²
-        u_xy = tnn.grad(0).grad(1)  # ∂²u/∂x∂y
-
-        # 构造微分算子 Du = ∂²u/∂x² + 2∂²u/∂x∂y + ∂²u/∂y²
-        Du = u_xx + (2.0 * u_xy) + u_yy
-
-        # 计算势能项: V₁(x)*u(x,y) 和 V₂(y)*u(x,y)
-        V1_u = tnn.multiply_1d_function(
-            V1_func, target_dim=0
-        )  # V₁(x) * u(x,y)
-        V2_u = tnn.multiply_1d_function(
-            V2_func, target_dim=1
-        )  # V₂(y) * u(x,y)
-
-        # 计算 λu
-        lambda_u = lambda_val * tnn
-
-        # 构造算子: operator_u = -Du + V₁u + V₂u - λu
-        operator_u = (-Du) + V1_u + V2_u + (-lambda_u)
-
-        # 计算L²范数: ∫∫ |operator_u|² dx dy
-        l2_norm_squared = integrator.tnn_int2(
-            operator_u, operator_u, domain_bounds
-        )
-
-        return l2_norm_squared
-
-    # 优化过程
-    print("\n开始优化...")
-
-    # 三阶段优化策略
-    losses = []
-
-    # 阶段1: Adam快速下降
-    print("=== 阶段1: Adam 快速下降 ===")
-    optimizer1 = optim.Adam(tnn.parameters(), lr=0.001)
-
-    for epoch in range(20):
-        optimizer1.zero_grad()
-        loss = compute_loss_function()
-        loss.backward()
-        optimizer1.step()
-
-        losses.append(loss.item())
-        if epoch % 1 == 0:
-            print(f"Epoch {epoch}: Loss = {loss.item():.8f}")
-
-    # 阶段2: Adam精细调优
-    print("\n=== 阶段2: Adam 精细调优 ===")
-    optimizer2 = optim.Adam(tnn.parameters(), lr=0.0001)
-
-    for epoch in range(20):
-        optimizer2.zero_grad()
-        loss = compute_loss_function()
-        loss.backward()
-        optimizer2.step()
-
-        losses.append(loss.item())
-        if epoch % 5 == 0:
-            print(f"Epoch {20 + epoch}: Loss = {loss.item():.8f}")
-
-    # 阶段3: LBFGS精确求解
-    print("\n=== 阶段3: LBFGS 精确求解 ===")
-    optimizer3 = optim.LBFGS(tnn.parameters(), lr=1.0)
-
-    for epoch in range(10):
-
-        def closure():
-            optimizer3.zero_grad()
-            loss = compute_loss_function()
-            loss.backward()
-            return loss.item()
-
-        loss = optimizer3.step(closure)
-        losses.append(loss.item() if isinstance(loss, torch.Tensor) else loss)
-
-        if epoch % 2 == 0:
-            print(f"Epoch {40 + epoch}: Loss = {losses[-1]:.10f}")
-
-    print("\n优化完成!")
-    print(f"最终损失: {losses[-1]:.10f}")
-
-    # 分析收敛过程
-    print("\n收敛分析:")
-    print(f"阶段1 (Adam快速): {losses[0]:.8f} -> {losses[19]:.8f}")
-    print(f"阶段2 (Adam精细): {losses[19]:.8f} -> {losses[39]:.8f}")
-    print(f"阶段3 (LBFGS): {losses[39]:.8f} -> {losses[-1]:.10f}")
-
-    # 测试函数在几个点的值
-    test_points = torch.tensor(
-        [[0.25, 0.25], [0.5, 0.5], [0.75, 0.75]], requires_grad=True
-    )
-
-    print("\n函数值测试:")
-    with torch.no_grad():
-        values = tnn(test_points)
-        for point, value in zip(test_points, values, strict=False):
-            print(f"u({point[0]:.2f}, {point[1]:.2f}) = {value.item():.6f}")
-
-    # 计算各项分量在测试点的值
-    print("\n各项分量分析:")
-    # 注意: 这里不能使用torch.no_grad(), 因为需要计算梯度
-    # 选择一个测试点进行详细分析
-    test_point = torch.tensor([[0.5, 0.5]], requires_grad=True)
-
-    # 计算u值
-    u_val = tnn(test_point)
-
-    # 计算导数项
-    u_x = tnn.grad(0)
-    u_y = tnn.grad(1)
-    u_xx = u_x.grad(0)
-    u_yy = u_y.grad(1)
-    u_xy = u_x.grad(1)
-
-    Du_val = (u_xx + 2.0 * u_xy + u_yy)(test_point)
-
-    # 计算势能项
-    V1_u_val = tnn.multiply_1d_function(V1_func, 0)(test_point)
-    V2_u_val = tnn.multiply_1d_function(V2_func, 1)(test_point)
-
-    print("在点(0.5, 0.5)处:")
-    print(f"  u = {u_val.item():.6f}")
-    print(f"  Du = {Du_val.item():.6f}")
-    print(f"  V₁u = {V1_u_val.item():.6f}")
-    print(f"  V₂u = {V2_u_val.item():.6f}")
-    print(f"  λu = {lambda_val * u_val.item():.6f}")
-
-    return tnn, losses
-
-
-# 运行示例
-if __name__ == "__main__":
-    tnn_mixed, losses_mixed = mixed_derivative_eigenvalue_problem()
