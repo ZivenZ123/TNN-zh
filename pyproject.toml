@@ -1,7 +1,55 @@
+# 构建系统配置
+# 使用 hatchling 作为构建后端, 这是一个现代化的 Python 包构建工具
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# 项目基本信息
 [project]
-name = "TNN"
+name = "tnn"
 version = "0.1.0"
-description = "Tensor Neural Network implementation and examples"
+description = "张量神经网络(TNN)实现 - 基于张量分解的神经网络架构"
 readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.11"
+authors = [{ name = "TNN Team", email = "tnn-team@example.com" }]
+maintainers = [{ name = "TNN Team", email = "tnn-team@example.com" }]
+keywords = [
+    "tensor",
+    "neural-network",
+    "pde",
+    "scientific-computing",
+    "tensor-decomposition",
+    "high-dimensional",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
 dependencies = ["jupyter>=1.1.1", "matplotlib>=3.10.3", "numpy<2", "torch<2.3"]
+
+# 项目链接
+[project.urls]
+Homepage = "https://github.com/ZivenZ123/TNN-zh"
+Repository = "https://github.com/ZivenZ123/TNN-zh"
+Documentation = "https://github.com/ZivenZ123/TNN-zh#readme"
+Issues = "https://github.com/ZivenZ123/TNN-zh/issues"
+Changelog = "https://github.com/ZivenZ123/TNN-zh/releases"
+
+# Hatch 构建工具配置
+[tool.hatch.version]
+path = "tnn/__init__.py"
+
+# Wheel 打包配置
+# 指定构建 Python wheel 包时只包含 tnn 核心库目录
+# 这样可以确保发布的包不包含 examples 等其他目录
+[tool.hatch.build.targets.wheel]
+packages = ["tnn"]

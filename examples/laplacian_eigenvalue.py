@@ -9,7 +9,7 @@ import math
 import torch
 import torch.optim as optim
 
-from tnn_reconstructed import TensorNeuralNetwork, TNNIntegrator
+from tnn import TensorNeuralNetwork, TNNIntegrator
 
 
 def gradient_squared_integral(
