@@ -114,6 +114,8 @@ uv run python tnn_reconstructed.py
 ```
 TNN/
 ├── tnn_reconstructed.py      # 主要的TNN实现文件
+├── mixed_derivative_solver.py # 混合导数特征值问题求解器
+├── rayleigh_quotient_solver.py # Rayleigh商特征值问题求解器
 ├── pyproject.toml            # 项目配置和依赖
 ├── uv.lock                   # 依赖锁定文件
 └── README.md                 # 项目说明文档
@@ -132,21 +134,15 @@ TNN/
 ### 1. 拉普拉斯特征值问题
 
 ```python
-# 运行主文件中的拉普拉斯特征值问题示例
-uv run python -c "
-from tnn_reconstructed import laplacian_eigenvalue_problem
-laplacian_eigenvalue_problem()
-"
+# 运行拉普拉斯特征值问题示例
+uv run python rayleigh_quotient_solver.py
 ```
 
 ### 2. 混合导数特征值问题
 
 ```python
 # 运行混合导数特征值问题示例
-uv run python -c "
-from tnn_reconstructed import mixed_derivative_eigenvalue_problem
-mixed_derivative_eigenvalue_problem()
-"
+uv run python mixed_derivative_solver.py
 ```
 
 ## 许可证
