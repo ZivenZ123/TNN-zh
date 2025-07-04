@@ -9,6 +9,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+# 全局设备设置
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 class DefaultSubNet(nn.Module):
     """
@@ -349,7 +352,7 @@ class TensorNeuralNetwork(nn.Module):
             self.rank = rank
 
             if initial_values is None:
-                initial_values = torch.ones(rank)
+                initial_values = torch.ones(rank).to(DEVICE)
             else:
                 # 验证initial_values必须是一阶张量
                 if not isinstance(initial_values, torch.Tensor):
@@ -364,6 +367,7 @@ class TensorNeuralNetwork(nn.Module):
                     raise ValueError(
                         f"initial_values的长度{initial_values.size(0)}与rank{rank}不匹配"
                     )
+                initial_values = initial_values.to(DEVICE)
 
             # 可学习参数: θᵣ会在训练过程中更新
             self.theta = nn.Parameter(initial_values)
@@ -485,12 +489,12 @@ class TensorNeuralNetwork(nn.Module):
         batch_size = x.shape[0]
 
         # 计算TNN输出
-        result = torch.zeros(batch_size, 1)
+        result = torch.zeros(batch_size, 1).to(x.device)
 
         # 对每个rank分量r
         for r in range(self.rank):
             # 计算 Π_{d=1}^{dim} subtnn_d^{(r)}(x_d)
-            product = torch.ones(batch_size, 1)
+            product = torch.ones(batch_size, 1).to(x.device)
 
             for d in range(self.dim):
                 # 提取第d维输入
@@ -1195,9 +1199,9 @@ class TNNIntegrator(nn.Module):
         def _get_gauss_legendre_points(self, n):
             """获取标准区间[-1,1]上的高斯-勒让德积分点和权重"""
             points, weights = np.polynomial.legendre.leggauss(n)
-            return torch.tensor(points, dtype=torch.float32), torch.tensor(
-                weights, dtype=torch.float32
-            )
+            return torch.tensor(points, dtype=torch.float32).to(
+                DEVICE
+            ), torch.tensor(weights, dtype=torch.float32).to(DEVICE)
 
         def transform_to_interval(self, a: float, b: float):
             """
@@ -1267,7 +1271,7 @@ class TNNIntegrator(nn.Module):
                 )
                 for r in range(tnn.rank)
             ]
-        )
+        ).to(DEVICE)
 
         # 计算每个rank的维度积分乘积: shape (rank,)
         dimensional_products = torch.prod(integral_matrix_1d, dim=1)

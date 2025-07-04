@@ -21,6 +21,7 @@ _高效解决偏微分方程求解中的维数灾难问题_
 - [项目结构](#项目结构)
 - [核心实现](#核心实现)
 - [使用示例](#使用示例)
+- [GPU 使用说明](#gpu-使用说明)
 - [API 参考](#api-参考)
 - [贡献指南](#贡献指南)
 - [许可证](#许可证)
@@ -53,6 +54,7 @@ $$\mathrm{tnn}(x_1, x_2, \ldots, x_d) = \sum_{r=1}^{\mathrm{rank}} \theta_r \pro
 ### Python 环境要求
 
 - **Python**: 3.11+
+- **PyTorch**: 自动安装（支持 CPU 和 GPU）
 - **依赖管理**: 推荐使用 [uv](https://github.com/astral-sh/uv)
 
 ### 安装 uv
@@ -135,7 +137,6 @@ TNN-zh/
 | **TensorNeuralNetwork**    | 主要的 TNN 实现，支持高维张量分解        |
 | **TNNIntegrator**          | 张量积分器，利用高斯积分实现高效数值积分 |
 | **TNNTrainer**             | 通用训练器，支持多种优化器和多阶段训练   |
-| **DefaultSubNet**          | 默认子网络实现，提供全连接网络           |
 
 ### 核心算法
 
@@ -152,10 +153,13 @@ TNN-zh/
 ### 快速开始
 
 ```python
-from tnn import TensorNeuralNetwork, TNNIntegrator, TNNTrainer
+from tnn import TensorNeuralNetwork, TNNIntegrator, TNNTrainer, DEVICE
 
-# 创建5维TNN
-tnn = TensorNeuralNetwork(dim=5, rank=15, domain_bounds=[(0, 1)] * 5)
+# 检查当前设备
+print(f"当前设备: {DEVICE}")  # 自动检测 GPU 或 CPU
+
+# 创建5维TNN (自动使用GPU加速)
+tnn = TensorNeuralNetwork(dim=5, rank=15, domain_bounds=[(0, 1)] * 5).to(DEVICE)
 
 # 创建积分器
 integrator = TNNIntegrator(n_quad_points=16)
@@ -179,6 +183,25 @@ training_phases = [
 losses, training_time = trainer.multi_phase(training_phases)
 ```
 
+### GPU 使用说明
+
+TNN 具有内置的 GPU 支持，无需额外配置：
+
+- **自动检测**: 代码会自动检测并使用 GPU（如果可用）
+- **设备管理**: 全局 `DEVICE` 变量自动设置为 `"cuda"` 或 `"cpu"`
+- **模型迁移**: 所有张量和模型会自动移动到正确的设备
+- **性能提升**: 在高维问题中可获得显著的性能提升
+
+如需强制使用 CPU：
+
+```python
+import torch
+import tnn.core as core
+
+# 强制使用CPU
+core.DEVICE = torch.device("cpu")
+```
+
 ### 拉普拉斯特征值问题
 
 求解 $-\Delta u = \lambda u$ 在 $[0,1]^d$ 上的特征值问题：
@@ -197,6 +220,7 @@ python examples/laplacian_eigenvalue.py
 ```
 >>> 5维拉普拉斯特征值问题 <<<
 张量秩: 15
+计算设备: cuda
 理论最小特征值: 49.348022
 
 >>> 开始多阶段训练 <<<
@@ -228,7 +252,8 @@ python examples/mixed_derivative_pde.py
 
 ## API 参考
 
-### TNNTrainer 类
+<details>
+<summary><strong> TNNTrainer 类 - 通用训练器</strong></summary>
 
 `TNNTrainer` 是通用训练器，支持多种优化器和多阶段训练策略。
 
@@ -292,9 +317,12 @@ train_simple(optimizer_type="adam", lr=0.001, epochs=100, **kwargs)
 | LBFGS  | 'lbfgs'  | `lr`, `max_iter`, `tolerance_grad`           |
 | SGD    | 'sgd'    | `lr`, `momentum`, `weight_decay`, `nesterov` |
 
-### TensorNeuralNetwork 类
+</details>
 
-主要的 TNN 实现，支持高维张量分解。
+<details>
+<summary><strong> TensorNeuralNetwork 类 - 张量神经网络</strong></summary>
+
+主要的 TNN 实现，支持高维张量分解和 GPU 加速。
 
 #### 构造函数
 
@@ -314,8 +342,26 @@ TensorNeuralNetwork(dim, rank, domain_bounds, subnet_factory=None)
 - `forward(x)`: 前向传播
 - `grad(dim)`: 计算关于指定维度的梯度
 - `multiply_1d_function(func, target_dim)`: 与一维函数相乘
+- `to(device)`: 将模型移动到指定设备 (GPU/CPU)
 
-### TNNIntegrator 类
+#### 设备管理
+
+TNN 支持自动 GPU 加速：
+
+```python
+from tnn import TensorNeuralNetwork, DEVICE
+
+# 创建TNN并移动到GPU
+tnn = TensorNeuralNetwork(dim=5, rank=15).to(DEVICE)
+
+# 检查模型设备
+print(f"模型设备: {next(tnn.parameters()).device}")
+```
+
+</details>
+
+<details>
+<summary><strong> TNNIntegrator 类 - 张量积分器</strong></summary>
 
 张量积分器，利用高斯积分实现高效数值积分。
 
@@ -332,6 +378,8 @@ TNNIntegrator(n_quad_points=16)
 #### 主要方法
 
 - `tnn_int2(tnn1, tnn2, domain_bounds)`: 计算两个 TNN 函数的内积
+
+</details>
 
 ---
 

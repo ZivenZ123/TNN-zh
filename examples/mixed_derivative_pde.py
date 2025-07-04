@@ -2,13 +2,24 @@
 混合导数特征值问题求解器
 
 基于张量神经网络(TNN)求解带混合导数的二元函数特征值问题
+
+GPU使用说明:
+1. 代码会自动检测并使用GPU (如果可用)
+2. 全局变量DEVICE自动设置为"cuda"或"cpu"
+3. 所有张量和模型会自动移动到正确的设备
+4. 如需强制使用CPU, 可以在代码中修改DEVICE变量
 """
 
 import math
 
 import torch
 
-from tnn import TensorNeuralNetwork, TNNIntegrator, TNNTrainer
+from tnn import (
+    DEVICE,
+    TensorNeuralNetwork,
+    TNNIntegrator,
+    TNNTrainer,
+)
 
 
 def mixed_derivative_eigenvalue_problem():
@@ -39,6 +50,7 @@ def mixed_derivative_eigenvalue_problem():
     lambda_val = 20.0  # 特征值参数, 可调整
     print(f"张量秩: {rank}")
     print(f"特征值λ: {lambda_val}")
+    print(f"计算设备: {DEVICE}")
 
     # 定义域边界 [0,1] × [0,1]
     domain_bounds = [(0.0, 1.0), (0.0, 1.0)]
@@ -48,7 +60,7 @@ def mixed_derivative_eigenvalue_problem():
         dim=dim,
         rank=rank,
         domain_bounds=domain_bounds,
-    )
+    ).to(DEVICE)
 
     # 创建积分器
     integrator = TNNIntegrator(n_quad_points=16)
@@ -60,7 +72,7 @@ def mixed_derivative_eigenvalue_problem():
 
     def V2_func(y):
         """V₂(y) = sin(√2πy)"""
-        return torch.sin(torch.sqrt(torch.tensor(2 * math.pi)) * y)
+        return torch.sin(torch.sqrt(torch.tensor(2 * math.pi).to(DEVICE)) * y)
 
     def loss_fn():
         """

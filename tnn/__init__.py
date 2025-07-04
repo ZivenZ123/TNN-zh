@@ -5,6 +5,7 @@ TNN (Tensor Neural Network) Package
 """
 
 from .core import (
+    DEVICE,
     DefaultSubNet,
     SubTensorNeuralNetwork,
     TensorNeuralNetwork,
@@ -21,4 +22,5 @@ __all__ = [
     "TensorNeuralNetwork",
     "TNNIntegrator",
     "TNNTrainer",
+    "DEVICE",
 ]

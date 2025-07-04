@@ -2,13 +2,24 @@
 Rayleigh商求解器 - 用于特征值问题的求解
 
 基于张量神经网络(TNN)的Rayleigh商计算和拉普拉斯特征值问题求解
+
+GPU使用说明:
+1. 代码会自动检测并使用GPU (如果可用)
+2. 全局变量DEVICE自动设置为"cuda"或"cpu"
+3. 所有张量和模型会自动移动到正确的设备
+4. 如需强制使用CPU, 可以在代码中修改DEVICE变量
 """
 
 import math
 
 import torch
 
-from tnn import TensorNeuralNetwork, TNNIntegrator, TNNTrainer
+from tnn import (
+    DEVICE,
+    TensorNeuralNetwork,
+    TNNIntegrator,
+    TNNTrainer,
+)
 
 
 def gradient_squared_integral(
@@ -43,7 +54,7 @@ def gradient_squared_integral(
         - 计算涉及自动微分, 可能比u²积分稍慢
         - 对于特征值问题, 这个积分与最小特征值直接相关
     """
-    total_integral = torch.tensor(0.0, requires_grad=True)
+    total_integral = torch.tensor(0.0, requires_grad=True).to(DEVICE)
 
     for i in range(tnn.dim):
         # 创建第i个梯度分量的TNN
@@ -168,6 +179,7 @@ def laplacian_eigenvalue_problem():
 
     print(f">>> {dim} 维拉普拉斯特征值问题 <<<")
     print(f"张量秩: {rank}")
+    print(f"计算设备: {DEVICE}")
     # 计算理论特征值
     theoretical_eigenvalue = dim * math.pi**2
     print(f"理论最小特征值: {theoretical_eigenvalue:.6f}")
@@ -180,7 +192,7 @@ def laplacian_eigenvalue_problem():
         dim=dim,
         rank=rank,
         domain_bounds=domain_bounds,
-    )
+    ).to(DEVICE)
 
     # 创建积分器
     integrator = TNNIntegrator(n_quad_points=16)
