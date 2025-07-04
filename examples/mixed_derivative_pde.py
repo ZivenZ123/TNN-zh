@@ -72,7 +72,9 @@ def mixed_derivative_eigenvalue_problem():
 
     def V2_func(y):
         """V₂(y) = sin(√2πy)"""
-        return torch.sin(torch.sqrt(torch.tensor(2 * math.pi).to(DEVICE)) * y)
+        # 确保常数和输入张量在同一设备上
+        sqrt_2pi = torch.sqrt(torch.tensor(2 * math.pi, device=y.device))
+        return torch.sin(sqrt_2pi * y)
 
     def loss_fn():
         """
