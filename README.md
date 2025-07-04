@@ -36,6 +36,7 @@ _高效解决偏微分方程求解中的维数灾难问题_
 
 - **张量分解**: 将高维函数表示为多个低维函数的张量积形式
 - **高效求解**: 有效解决偏微分方程求解中的维数灾难问题
+- **高精度积分**: 支持区间细分的高斯积分，提升非光滑函数的积分精度
 - **通用训练器**: 提供统一的训练接口，支持多种优化器和多阶段训练
 - **科学计算**: 专为科学计算和数值分析设计
 
@@ -131,12 +132,12 @@ TNN-zh/
 
 ### 主要组件
 
-| 组件                       | 功能描述                                 |
-| -------------------------- | ---------------------------------------- |
-| **SubTensorNeuralNetwork** | 子张量神经网络，处理一维输入输出         |
-| **TensorNeuralNetwork**    | 主要的 TNN 实现，支持高维张量分解        |
-| **TNNIntegrator**          | 张量积分器，利用高斯积分实现高效数值积分 |
-| **TNNTrainer**             | 通用训练器，支持多种优化器和多阶段训练   |
+| 组件                       | 功能描述                                                       |
+| -------------------------- | -------------------------------------------------------------- |
+| **SubTensorNeuralNetwork** | 子张量神经网络，处理一维输入输出                               |
+| **TensorNeuralNetwork**    | 主要的 TNN 实现，支持高维张量分解                              |
+| **TNNIntegrator**          | 张量积分器，利用高斯积分实现高效数值积分，支持区间细分提升精度 |
+| **TNNTrainer**             | 通用训练器，支持多种优化器和多阶段训练                         |
 
 ### 核心算法
 
@@ -161,7 +162,7 @@ print(f"当前设备: {DEVICE}")  # 自动检测 GPU 或 CPU
 # 创建5维TNN (自动使用GPU加速)
 tnn = TensorNeuralNetwork(dim=5, rank=15, domain_bounds=[(0, 1)] * 5).to(DEVICE)
 
-# 创建积分器
+# 创建积分器 (支持区间细分以提升积分精度)
 integrator = TNNIntegrator(n_quad_points=16)
 
 # 定义损失函数
@@ -363,7 +364,7 @@ print(f"模型设备: {next(tnn.parameters()).device}")
 <details>
 <summary><strong> TNNIntegrator 类 - 张量积分器</strong></summary>
 
-张量积分器，利用高斯积分实现高效数值积分。
+张量积分器，利用高斯积分实现高效数值积分，支持区间细分功能以提升积分精度。
 
 #### 构造函数
 
@@ -373,11 +374,51 @@ TNNIntegrator(n_quad_points=16)
 
 **参数**:
 
-- `n_quad_points`: 高斯积分点数
+- `n_quad_points`: 高斯积分点数，默认为 16
 
 #### 主要方法
 
+##### 基础积分方法
+
+- `tnn_int1(tnn, domain_bounds)`: 计算单个 TNN 函数的积分
 - `tnn_int2(tnn1, tnn2, domain_bounds)`: 计算两个 TNN 函数的内积
+
+##### 区间细分积分方法
+
+- `tnn_int1_with_subdivision(tnn, domain_bounds, sub_intervals=10)`: 带区间细分的单个 TNN 积分
+- `tnn_int2_with_subdivision(tnn1, tnn2, domain_bounds, sub_intervals=10)`: 带区间细分的两个 TNN 内积
+
+#### 区间细分功能
+
+区间细分通过将积分区间分成多个等距的子区间来提高积分精度，特别适用于：
+
+- 非光滑函数的积分
+- 振荡函数的积分
+- 复杂子网络输出的积分
+
+**使用示例**:
+
+```python
+integrator = TNNIntegrator(n_quad_points=16)
+tnn = TensorNeuralNetwork(dim=2, rank=5)
+domain = [(0.0, 1.0), (0.0, 1.0)]
+
+# 基础积分
+result1 = integrator.tnn_int1(tnn, domain)
+
+# 使用区间细分 (每个维度分成10个子区间)
+result2 = integrator.tnn_int1_with_subdivision(tnn, domain, sub_intervals=10)
+
+# 两个TNN的内积，使用区间细分
+result3 = integrator.tnn_int2_with_subdivision(tnn1, tnn2, domain, sub_intervals=10)
+```
+
+**性能对比**:
+
+| 方法     | 精度 | 计算成本 | 适用场景        |
+| -------- | ---- | -------- | --------------- |
+| 基础积分 | 标准 | 低       | 光滑函数        |
+| 区间细分 | 高   | 中等     | 非光滑/振荡函数 |
 
 </details>
 

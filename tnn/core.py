@@ -1226,6 +1226,67 @@ class TNNIntegrator(nn.Module):
             transformed_weights = (b - a) / 2 * self.weights
             return transformed_points, transformed_weights
 
+        def transform_to_interval_with_subdivision(
+            self, a: float, b: float, sub_intervals: int = 1
+        ):
+            """
+            将积分点从[-1,1]变换到[a,b], 支持区间细分
+
+            通过将积分区间[a,b]分成sub_intervals个等距的子区间,
+            在每个子区间内分别应用高斯积分, 然后合并结果。
+            这种方法可以提高积分精度, 特别是对于非光滑函数或振荡函数。
+
+            数学原理:
+            ∫_{a}^{b} f(x) dx = Σ_{i=1}^{n} ∫_{a_i}^{b_i} f(x) dx
+            其中 a_i = a + (i-1)h, b_i = a + ih, h = (b-a)/n
+
+            Args:
+                a: 积分区间下界
+                b: 积分区间上界
+                sub_intervals: 子区间数量, 默认为1(不细分)
+
+            Returns:
+                tuple: (transformed_points, transformed_weights)
+                    - transformed_points: 合并后的积分点, 总数为sub_intervals * n_quad_points
+                    - transformed_weights: 合并后的积分权重
+
+            Note:
+                - 当sub_intervals=1时, 等价于调用transform_to_interval
+                - 子区间数量越多, 对非光滑函数的积分精度越高
+                - 总的积分点数为sub_intervals * n_quad_points
+            """
+            if sub_intervals == 1:
+                # 如果不细分, 直接使用原有方法
+                return self.transform_to_interval(a, b)
+
+            # 计算子区间的长度
+            sub_interval_length = (b - a) / sub_intervals
+
+            # 存储所有子区间的积分点和权重
+            all_points = []
+            all_weights = []
+
+            # 对每个子区间应用高斯积分
+            for i in range(sub_intervals):
+                # 计算第i个子区间的边界
+                sub_a = a + i * sub_interval_length
+                sub_b = a + (i + 1) * sub_interval_length
+
+                # 获取该子区间的积分点和权重
+                sub_points, sub_weights = self.transform_to_interval(
+                    sub_a, sub_b
+                )
+
+                # 添加到总列表中
+                all_points.append(sub_points)
+                all_weights.append(sub_weights)
+
+            # 合并所有子区间的积分点和权重
+            merged_points = torch.cat(all_points, dim=0)
+            merged_weights = torch.cat(all_weights, dim=0)
+
+            return merged_points, merged_weights
+
     def __init__(self, n_quad_points: int = 16):
         super().__init__()
         self.n_quad_points = n_quad_points
@@ -1281,6 +1342,118 @@ class TNNIntegrator(nn.Module):
         total_integral = torch.sum(theta_coeffs * dimensional_products)
 
         return total_integral
+
+    def tnn_int1_with_subdivision(
+        self,
+        tnn: TensorNeuralNetwork,
+        domain_bounds: list[tuple[float, float]],
+        sub_intervals: int = 10,
+    ):
+        """
+        单个TNN的积分计算, 支持区间细分
+
+        利用TNN结构和区间细分进行高效高精度积分计算:
+        对于TNN: u(x) = Σ_{r=1}^{rank} θᵣ Π_{d=1}^{dim} subtnn_d^{(r)}(x_d)
+
+        积分: ∫ u(x) dx = Σ_{r=1}^{rank} θᵣ Π_{d=1}^{dim} (∫ subtnn_d^{(r)}(x_d) dx_d)
+
+        区间细分优势:
+        1. 提高非光滑函数的积分精度
+        2. 更好地处理振荡函数
+        3. 对于复杂的子网络输出, 提供更稳定的积分结果
+
+        Args:
+            tnn: 待积分的TensorNeuralNetwork
+            domain_bounds: 积分域边界, 格式为[(a₁, b₁), (a₂, b₂), ...]
+            sub_intervals: 每个维度的子区间数量, 默认为1(不细分)
+
+        Returns:
+            torch.Tensor: TNN在指定域上的积分值
+
+        Example:
+            >>> integrator = TNNIntegrator(n_quad_points=16)
+            >>> tnn = TensorNeuralNetwork(dim=2, rank=3)
+            >>> domain = [(0.0, 1.0), (0.0, 1.0)]
+            >>> # 不细分
+            >>> result1 = integrator.tnn_int1_with_subdivision(tnn, domain, 1)
+            >>> # 每个维度分成5个子区间
+            >>> result2 = integrator.tnn_int1_with_subdivision(tnn, domain, 5)
+
+        Note:
+            - 当sub_intervals=1时, 等价于调用tnn_int1
+            - 子区间数量越多, 积分精度越高, 但计算成本也越高
+            - 总积分点数为sub_intervals * n_quad_points (每个维度)
+        """
+        # 预计算所有维度的积分点和权重, 使用区间细分
+        transformed_quad_data = [
+            self.gaussian_quadrature.transform_to_interval_with_subdivision(
+                a_d, b_d, sub_intervals
+            )
+            for a_d, b_d in domain_bounds
+        ]
+
+        # 向量化计算所有rank和维度的一维积分
+        # 使用列表推导式和torch.stack进行批量计算
+        integral_matrix_1d = torch.stack(
+            [
+                torch.stack(
+                    [
+                        torch.sum(
+                            wts * tnn.subnet(r, d)(pts.unsqueeze(1)).squeeze()
+                        )
+                        for d, (pts, wts) in enumerate(transformed_quad_data)
+                    ]
+                )
+                for r in range(tnn.rank)
+            ]
+        ).to(DEVICE)
+
+        # 计算每个rank的维度积分乘积: shape (rank,)
+        dimensional_products = torch.prod(integral_matrix_1d, dim=1)
+
+        # 获取系数向量并计算最终积分
+        theta_coeffs = tnn.theta_module()
+        total_integral = torch.sum(theta_coeffs * dimensional_products)
+
+        return total_integral
+
+    def tnn_int2_with_subdivision(
+        self,
+        tnn1: TensorNeuralNetwork,
+        tnn2: TensorNeuralNetwork,
+        domain_bounds: list[tuple[float, float]],
+        sub_intervals: int = 10,
+    ):
+        """
+        两个TNN乘积的积分计算, 支持区间细分
+
+        利用TNN的@操作符直接计算两个TNN乘积的积分:
+        ∫ (tnn1 @ tnn2) dx
+
+        Args:
+            tnn1: 第一个TNN
+            tnn2: 第二个TNN
+            domain_bounds: 积分域边界
+            sub_intervals: 每个维度的子区间数量, 默认为1(不细分)
+
+        Returns:
+            torch.Tensor: 两个TNN乘积的积分值
+
+        Example:
+            >>> integrator = TNNIntegrator(n_quad_points=16)
+            >>> tnn1 = TensorNeuralNetwork(dim=2, rank=3)
+            >>> tnn2 = TensorNeuralNetwork(dim=2, rank=2)
+            >>> domain = [(0.0, 1.0), (0.0, 1.0)]
+            >>> # 使用区间细分计算乘积积分
+            >>> result = integrator.tnn_int2_with_subdivision(tnn1, tnn2, domain, 3)
+        """
+        # 使用TNN的@操作符创建乘积TNN
+        product_tnn = tnn1 @ tnn2
+
+        # 使用tnn_int1_with_subdivision计算乘积TNN的积分
+        return self.tnn_int1_with_subdivision(
+            product_tnn, domain_bounds, sub_intervals
+        )
 
     def tnn_int2(
         self,
