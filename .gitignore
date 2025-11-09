@@ -1,0 +1,66 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+
+# IDE 配置
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 测试相关
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# 图片文件
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.svg
+
+# 数据文件
+*.json
+*.csv
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+
+# 根目录所有 Python 脚本 (保留子目录的Python文件)
+/*.py
+
+# 编译文件
+*.o
+*.a
+*.lib
+*.dll
+*.dylib
+
+# 日志
+*.log
+
+# 临时文件
+*.tmp
+*.bak
+*.swp
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+

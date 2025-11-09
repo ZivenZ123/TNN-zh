@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tnn_zh"
+version = "0.1.0"
+description = "张量神经网络(TNN) - 基于张量分解的神经网络架构用于高精度PDE求解"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "ZivenZ123", email = "zy.zhong@outlook.com" }]
+keywords = [
+    "tensor-neural-network",
+    "PDE",
+    "scientific-computing",
+    "deep-learning",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+dependencies = ["matplotlib>=3.10.7", "numpy<2", "scipy>=1.16.3", "torch<2.3"]
+
+[project.urls]
+Homepage = "https://github.com/ZivenZ123/TNN-zh"
+Repository = "https://github.com/ZivenZ123/TNN-zh"
+Issues = "https://github.com/ZivenZ123/TNN-zh/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tnn_zh"]
