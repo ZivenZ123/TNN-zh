@@ -16,7 +16,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-
 from tnn_zh import (
     TNN,
     SeparableDimNetworkGELU,

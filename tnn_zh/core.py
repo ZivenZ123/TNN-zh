@@ -233,6 +233,78 @@ class TNN(nn.Module):
             theta_module=self.theta_module,
         )
 
+    def laplace(self) -> "TNN":
+        """
+        计算Laplacian算子 Δu = Σ ∂²u/∂x_i²
+
+        返回:
+            TNN: 新的TNN实例, rank扩大为 rank * dim
+        """
+
+        class LaplaceFunc(nn.Module):
+            def __init__(self, original_func: nn.Module, dim: int, rank: int):
+                super().__init__()
+                self.original_func = original_func
+                self.tnn_dim = dim
+                self.tnn_rank = rank
+
+            def forward(self, x):
+                """
+                x: (n_1d, dim)
+                返回: (n_1d, rank * dim, dim)
+                """
+                # 获取函数值和二阶导数
+                # val, grad2: (n_1d, rank, dim)
+                val, _, grad2 = self.original_func.forward_all_grad2(x)
+
+                n_1d = val.shape[0]
+
+                # 构造 dim 个块, 每个块对应一个维度的二阶导数项
+                # 结果: (n_1d, dim, rank, dim)
+                val_expanded = (
+                    val.unsqueeze(1).expand(-1, self.tnn_dim, -1, -1).clone()
+                )
+
+                # 使用高级索引一次性替换所有对角元素
+                # 创建索引: 对于每个块 k, 替换 [:, k, :, k] 位置
+                dim_indices = torch.arange(self.tnn_dim, device=x.device)
+                # 注意: 高级索引被切片分隔时, 索引维度会移到最前面
+                # val_expanded[:, dim_indices, :, dim_indices] 的形状为 (dim, n_1d, rank)
+                # grad2 原始形状为 (n_1d, rank, dim)
+                # 所以需要 permute 为 (dim, n_1d, rank)
+                val_expanded[:, dim_indices, :, dim_indices] = grad2.permute(
+                    2, 0, 1
+                )
+
+                # 展平: (n_1d, dim * rank, dim)
+                return val_expanded.reshape(
+                    n_1d, self.tnn_dim * self.tnn_rank, -1
+                )
+
+        class LaplaceThetaModule(ThetaModule):
+            def __init__(self, original_theta_module: ThetaModule, dim: int):
+                super().__init__(
+                    original_theta_module.rank * dim, learnable=False
+                )
+                del self.theta
+                self.original_theta_module = original_theta_module
+                self.tnn_dim = dim
+
+            def forward(self):
+                # theta: (rank,) -> (dim * rank,)
+                # 重复 theta: [theta, theta, ..., theta]
+                return self.original_theta_module().repeat(self.tnn_dim)
+
+        laplace_func = LaplaceFunc(self.func, self.dim, self.rank)
+        laplace_theta = LaplaceThetaModule(self.theta_module, self.dim)
+
+        return TNN(
+            dim=self.dim,
+            rank=self.rank * self.dim,
+            func=laplace_func,
+            theta_module=laplace_theta,
+        )
+
     def cat(self, other: "TNN") -> "TNN":
         """
         将当前TNN与另一个TNN拼接
@@ -309,13 +381,9 @@ class TNN(nn.Module):
                 del self.theta
                 self.theta_module1 = theta_module1
                 self.theta_module2 = theta_module2
-                self.register_buffer(
-                    "theta",
-                    torch.cat([theta_module1(), theta_module2()]),
-                )
 
             def forward(self):
-                return self.theta
+                return torch.cat([self.theta_module1(), self.theta_module2()])
 
         new_theta_module = CatThetaModule(
             self.theta_module, other.theta_module
@@ -341,12 +409,10 @@ class TNN(nn.Module):
                 super().__init__(original_theta_module.rank, learnable=False)
                 del self.theta
                 self.original_theta_module = original_theta_module
-                self.register_buffer(
-                    "scaled_theta", self.original_theta_module() * scalar
-                )
+                self.scalar = scalar
 
             def forward(self) -> torch.Tensor:
-                return self.scaled_theta
+                return self.original_theta_module() * self.scalar
 
         scaled_theta_module = ScaledThetaModule(self.theta_module, scalar)
 
@@ -417,13 +483,11 @@ class TNN(nn.Module):
                 self.theta_module1 = theta_module1
                 self.theta_module2 = theta_module2
 
-                product_coeffs = torch.einsum(
-                    "i,j->ij", theta_module1(), theta_module2()
-                ).flatten()
-                self.register_buffer("product_theta", product_coeffs)
-
             def forward(self):
-                return self.product_theta
+                product_coeffs = torch.einsum(
+                    "i,j->ij", self.theta_module1(), self.theta_module2()
+                ).flatten()
+                return product_coeffs
 
         product_theta_module = ProductThetaModule(
             self.theta_module, other.theta_module
@@ -505,12 +569,9 @@ class TNN(nn.Module):
                 del self.theta
                 self.original_theta_module = original_theta_module
                 self.register_buffer("factor", factor)
-                self.register_buffer(
-                    "sliced_theta", self.original_theta_module() * self.factor
-                )
 
             def forward(self) -> torch.Tensor:
-                return self.sliced_theta
+                return self.original_theta_module() * self.factor
 
         new_theta_module = SlicedThetaModule(
             self.theta_module, fixed_dims_factor
@@ -985,6 +1046,55 @@ class SeparableDimNetwork(nn.Module):
 
             return output, grad2_output
 
+    def forward_all_grad2(self, x):
+        """
+        同时计算所有维度的二阶导数 (主对角线)
+
+        参数:
+            x: shape为(n_1d, dim)
+
+        返回:
+            output: (n_1d, rank, dim)
+            grad_output: (n_1d, rank, dim) - 一阶导数
+            grad2_output: (n_1d, rank, dim) - 二阶导数
+        """
+        # (n_1d, dim) → (dim, n_1d) → (dim, 1, n_1d)
+        x = x.t().unsqueeze(1)
+
+        # 初始化所有维度的梯度 (dim, out_size_0, 1)
+        # weights[0] shape: (dim, out_size, 1)
+        grad_x = self.weights[0].clone()
+        grad2_x = torch.zeros_like(grad_x)
+
+        # 逐层前向传播和梯度传播
+        for i in range(self.num_layers):
+            # 前向传播
+            x = torch.bmm(self.weights[i], x) + self.biases[i]
+            x = torch.tanh(x)
+
+            # 计算导数
+            # x: (dim, out_size, n_1d)
+            tanh_grad = 1.0 - x * x  # tanh'
+            tanh_grad2 = -2.0 * x * tanh_grad  # tanh''
+
+            # 链式法则
+            # grad_x需要广播到n_1d: (dim, in_size, 1) * ... -> (dim, out_size, n_1d)
+            # 但这里grad_x在循环中会变成 (dim, size, n_1d)
+            grad2_x = tanh_grad2 * (grad_x * grad_x) + tanh_grad * grad2_x
+            grad_x = tanh_grad * grad_x
+
+            # 传播到下一层
+            if i < self.num_layers - 1:
+                grad_x = torch.bmm(self.weights[i + 1], grad_x)
+                grad2_x = torch.bmm(self.weights[i + 1], grad2_x)
+
+        # (dim, rank, n_1d) → (n_1d, rank, dim)
+        output = x.permute(2, 1, 0)
+        grad_output = grad_x.permute(2, 1, 0)
+        grad2_output = grad2_x.permute(2, 1, 0)
+
+        return output, grad_output, grad2_output
+
 
 class SeparableDimNetworkGELU(nn.Module):
     def __init__(
@@ -1222,6 +1332,51 @@ class SeparableDimNetworkGELU(nn.Module):
             grad2_output[:, :, grad_dim2] = grad_x2.t()
 
             return output, grad2_output
+
+    def forward_all_grad2(self, x):
+        """
+        同时计算所有维度的二阶导数 (主对角线)
+
+        参数:
+            x: shape为(n_1d, dim)
+
+        返回:
+            output: (n_1d, rank, dim)
+            grad_output: (n_1d, rank, dim) - 一阶导数
+            grad2_output: (n_1d, rank, dim) - 二阶导数
+        """
+        # (n_1d, dim) → (dim, n_1d) → (dim, 1, n_1d)
+        x = x.t().unsqueeze(1)
+
+        # 初始化所有维度的梯度
+        grad_x = self.weights[0].clone()
+        grad2_x = torch.zeros_like(grad_x)
+
+        # 逐层前向传播和梯度传播
+        for i in range(self.num_layers):
+            # 前向传播(保存激活前的值)
+            x_pre_act = torch.bmm(self.weights[i], x) + self.biases[i]
+            x = F.gelu(x_pre_act)
+
+            # 计算GELU的一阶和二阶导数
+            gelu_grad = self._gelu_grad(x_pre_act)
+            gelu_grad2 = self._gelu_grad2(x_pre_act)
+
+            # 链式法则
+            grad2_x = gelu_grad2 * (grad_x * grad_x) + gelu_grad * grad2_x
+            grad_x = gelu_grad * grad_x
+
+            # 传播到下一层
+            if i < self.num_layers - 1:
+                grad_x = torch.bmm(self.weights[i + 1], grad_x)
+                grad2_x = torch.bmm(self.weights[i + 1], grad2_x)
+
+        # (dim, rank, n_1d) → (n_1d, rank, dim)
+        output = x.permute(2, 1, 0)
+        grad_output = grad_x.permute(2, 1, 0)
+        grad2_output = grad2_x.permute(2, 1, 0)
+
+        return output, grad_output, grad2_output
 
 
 def wrap_1d_func_as_tnn(dim: int, target_dim: int):
@@ -1514,6 +1669,38 @@ def apply_dirichlet_bd(boundary: list[tuple[float | None, float | None]]):
                     grad2_output = d2f * bd
 
                 return output, grad2_output
+
+            def forward_all_grad2(self, x):
+                """
+                同时计算所有维度的二阶导数 (主对角线)
+                利用乘积法则: u'' = f''B + 2f'B' + fB''
+                """
+                if not hasattr(self.original_func, "forward_all_grad2"):
+                    raise NotImplementedError(
+                        f"{type(self.original_func).__name__}不支持forward_all_grad2"
+                    )
+
+                # 调用原函数
+                f, df, d2f = self.original_func.forward_all_grad2(x)
+
+                # 计算边界条件及其导数
+                b, db, d2b = self._compute_bd_value_and_derivs(x)
+
+                # 扩展维度: (n_1d, dim) -> (n_1d, 1, dim)
+                b = b.unsqueeze(1)
+                db = db.unsqueeze(1)
+                d2b = d2b.unsqueeze(1)
+
+                # u = f * b
+                output = f * b
+
+                # u' = f' * b + f * b'
+                grad_output = df * b + f * db
+
+                # u'' = f'' * b + 2 * f' * b' + f * b''
+                grad2_output = d2f * b + 2.0 * df * db + f * d2b
+
+                return output, grad_output, grad2_output
 
         return BoundaryFunc(func, boundary)
 
