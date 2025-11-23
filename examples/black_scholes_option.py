@@ -19,7 +19,6 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 from tnn_zh import (
     TNN,
     SeparableDimNetworkGELU,
-    TNNTrainer,
     generate_quad_points,
     int_tnn_L2,
     wrap_1d_func_as_tnn,
@@ -134,14 +133,11 @@ def create_tnn(rank, boundary_spec):
     return TNN(dim=3, rank=rank, func=bounded_func).to(DEVICE, dtype=DTYPE)
 
 
-def train_step(tnn: TNN, loss_module, phases, step_name, print_interval=100):
+def train_step(tnn: TNN, loss_module, phases, step_name):
     """通用训练函数"""
     print(f"\n>>> {step_name} <<<")
-    trainer = TNNTrainer(tnn, loss_module, print_interval=print_interval)
-    losses, time_elapsed = trainer.multi_phase(phases)
-    print(
-        f"{step_name}完成! 最终损失: {losses[-1]:.8f}, 用时: {time_elapsed:.2f}s"
-    )
+    losses = tnn.fit(loss_module, phases)
+    print(f"{step_name}完成! 最终损失: {losses[-1]:.8f}")
     return tnn
 
 

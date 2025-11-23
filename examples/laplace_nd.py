@@ -12,7 +12,6 @@ import torch.nn as nn
 from tnn_zh import (
     TNN,
     SeparableDimNetworkGELU,
-    TNNTrainer,
     generate_quad_points,
     int_tnn_L2,
 )
@@ -104,8 +103,7 @@ def solve():
     ]
 
     print("开始训练...")
-    trainer = TNNTrainer(u_tnn, loss_fn, print_interval=200)
-    trainer.multi_phase(phases)
+    u_tnn.fit(loss_fn, phases)
     print("训练完成. ")
 
     return u_tnn

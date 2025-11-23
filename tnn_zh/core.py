@@ -8,10 +8,13 @@ tnn(x₁, x₂, ..., x_dim) = Σ_{r=1}^{rank} θᵣ Π_{d=1}^{dim} subtnn_d^{(r)
 """
 
 import math
+from collections.abc import Callable
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
+import torch.optim as optim
+from tqdm import tqdm
 
 
 class ThetaModule(nn.Module):
@@ -825,6 +828,111 @@ class TNN(nn.Module):
             raise ValueError("除数不能为零")
 
         return self * (1.0 / scalar_value)
+
+    def fit(
+        self, loss_fn: Callable[[], torch.Tensor | tuple], phases: list[dict]
+    ) -> list[float]:
+        """
+        训练TNN模型
+
+        参数:
+            loss_fn: 损失函数, 返回标量Tensor或tuple
+            phases: 训练阶段配置列表, 每个元素是一个字典, 包含:
+                - 'type': 'adam' 或 'lbfgs'
+                - 'lr': 学习率
+                - 'epochs': 训练轮数
+                - 其他参数 (如 grad_clip, weight_decay 等)
+
+        返回:
+            losses: 训练过程中的损失历史
+        """
+        losses = []
+
+        for i, phase_config in enumerate(phases):
+            phase_type = phase_config["type"].lower()
+            lr = phase_config["lr"]
+            epochs = phase_config["epochs"]
+
+            phase_desc = f"Phase {i + 1}/{len(phases)} ({phase_type.upper()})"
+
+            if phase_type == "adam":
+                optimizer = optim.Adam(
+                    self.parameters(),
+                    lr=lr,
+                    weight_decay=phase_config.get("weight_decay", 0.0),
+                    betas=phase_config.get("betas", (0.9, 0.999)),
+                    eps=phase_config.get("eps", 1e-8),
+                )
+
+                grad_clip = phase_config.get("grad_clip", None)
+
+                with tqdm(range(epochs), desc=phase_desc) as pbar:
+                    for step in pbar:
+                        optimizer.zero_grad()
+                        loss_result = loss_fn()
+                        loss = (
+                            loss_result[0]
+                            if isinstance(loss_result, tuple)
+                            else loss_result
+                        )
+                        loss.backward()
+
+                        if grad_clip is not None:
+                            torch.nn.utils.clip_grad_norm_(
+                                self.parameters(), grad_clip
+                            )
+
+                        optimizer.step()
+
+                        if step % 10 == 0 or step == epochs - 1:
+                            loss_val = loss.item()
+                            losses.append(loss_val)
+                            pbar.set_postfix(loss=f"{loss_val:.2e}")
+
+            elif phase_type == "lbfgs":
+                optimizer = optim.LBFGS(
+                    self.parameters(),
+                    lr=lr,
+                    max_iter=phase_config.get("max_iter", 20),
+                    max_eval=phase_config.get("max_eval", None),
+                    tolerance_grad=phase_config.get("tolerance_grad", 1e-7),
+                    tolerance_change=phase_config.get(
+                        "tolerance_change", 1e-9
+                    ),
+                    history_size=phase_config.get("history_size", 100),
+                )
+
+                with tqdm(range(epochs), desc=phase_desc) as pbar:
+                    for step in pbar:
+
+                        def closure(optimizer=optimizer):
+                            optimizer.zero_grad()
+                            loss_result = loss_fn()
+                            loss = (
+                                loss_result[0]
+                                if isinstance(loss_result, tuple)
+                                else loss_result
+                            )
+                            loss.backward()
+                            return loss.item()
+
+                        loss = optimizer.step(closure)
+
+                        if step % 10 == 0 or step == epochs - 1:
+                            loss_val = (
+                                loss.item()
+                                if isinstance(loss, torch.Tensor)
+                                else loss
+                            )
+                            losses.append(loss_val)
+                            pbar.set_postfix(loss=f"{loss_val:.2e}")
+
+            else:
+                raise ValueError(
+                    f"不支持的优化器类型: {phase_type}, 仅支持 'adam' 和 'lbfgs'"
+                )
+
+        return losses
 
 
 class SeparableDimNetwork(nn.Module):
