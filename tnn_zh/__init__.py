@@ -11,11 +11,11 @@ from .core import (
     wrap_1d_func_as_tnn,
 )
 from .integration import (
-    int_tnn,
-    int_tnn_product,
-    int_tnn_L2,
-    generate_quad_points,
     GaussLegendre,
+    generate_quad_points,
+    int_tnn,
+    int_tnn_L2,
+    int_tnn_product,
 )
 
 __version__ = "0.1.0"
@@ -28,5 +28,9 @@ __all__ = [
     "SeparableDimNetworkGELU",
     "apply_dirichlet_bd",
     "wrap_1d_func_as_tnn",
+    "int_tnn",
+    "int_tnn_product",
+    "int_tnn_L2",
+    "generate_quad_points",
     "GaussLegendre",
 ]

@@ -1,10 +1,29 @@
 """
-张量神经网络 (TNN) - 重构版本
+张量神经网络 (TNN) - 用于高维函数逼近和求解偏微分方程
 
-核心数学表达式:
-tnn(x₁, x₂, ..., x_dim) = Σ_{r=1}^{rank} θᵣ Π_{d=1}^{dim} subtnn_d^{(r)}(x_d)
+核心思想:
+利用变量分离的形式逼近高维函数, 将高维问题转化为一维问题的组合.
+这种结构类似于张量分解(Tensor Decomposition)中的CP分解(Canonical Polyadic Decomposition).
 
-关键: 有 rank*dim 个子函数输出值 subtnn_d^{(r)}(x_d)
+数学表达式:
+u(x₁, x₂, ..., x_dim) = Σ_{r=1}^{rank} θᵣ * Π_{d=1}^{dim} subtnn_d^{(r)}(x_d)
+
+其中:
+- dim: 输入数据的维度
+- rank: 张量分解的秩(Rank), 决定了模型的表达能力
+- θᵣ: 第r个秩的权重系数
+- subtnn_d^{(r)}(x_d): 第r个秩在第d个维度上的单变量子函数
+
+主要模块:
+- TNN: 核心类, 负责组装子函数和权重, 实现前向传播及各种微分算子(梯度, 拉普拉斯等).
+- ThetaModule: 管理权重系数 θᵣ 的模块.
+- SeparableDimNetwork: 维度可分离神经网络, 高效实现 subtnn_d^{(r)}(x_d) 的前向传播
+  它利用批量矩阵乘法同时计算所有秩和维度的子函数值, 避免了Python循环.
+
+主要功能:
+- 前向传播 (Forward)
+- 自动微分 (Automatic Differentiation): 支持一阶导数(grad), 二阶导数(grad2), 拉普拉斯算子(laplace), 这对于求解PDE非常关键.
+- 运算重载: 支持TNN之间的加减乘除(标量)运算, 方便构建复杂的损失函数.
 """
 
 import math
