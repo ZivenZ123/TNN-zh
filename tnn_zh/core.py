@@ -1095,6 +1095,9 @@ class SeparableDimNetwork(nn.Module):
 
         return output, grad_output, grad2_output
 
+    def apply_dirichlet_bd(self, boundary):
+        return apply_dirichlet_bd(boundary)(self)
+
 
 class SeparableDimNetworkGELU(nn.Module):
     def __init__(
@@ -1377,6 +1380,9 @@ class SeparableDimNetworkGELU(nn.Module):
         grad2_output = grad2_x.permute(2, 1, 0)
 
         return output, grad_output, grad2_output
+
+    def apply_dirichlet_bd(self, boundary):
+        return apply_dirichlet_bd(boundary)(self)
 
 
 def wrap_1d_func_as_tnn(dim: int, target_dim: int):

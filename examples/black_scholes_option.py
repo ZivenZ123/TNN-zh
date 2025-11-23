@@ -20,7 +20,6 @@ from tnn_zh import (
     TNN,
     SeparableDimNetworkGELU,
     TNNTrainer,
-    apply_dirichlet_bd,
     generate_quad_points,
     int_tnn_L2,
     wrap_1d_func_as_tnn,
@@ -127,8 +126,11 @@ class Step2PDELoss(nn.Module):
 
 def create_tnn(rank, boundary_spec):
     """创建带边界条件的TNN"""
-    func = SeparableDimNetworkGELU(dim=3, rank=rank).to(DEVICE, dtype=DTYPE)
-    bounded_func = apply_dirichlet_bd(boundary_spec)(func)
+    bounded_func = (
+        SeparableDimNetworkGELU(dim=3, rank=rank)
+        .apply_dirichlet_bd(boundary_spec)
+        .to(DEVICE, dtype=DTYPE)
+    )
     return TNN(dim=3, rank=rank, func=bounded_func).to(DEVICE, dtype=DTYPE)
 
 

@@ -13,7 +13,6 @@ from tnn_zh import (
     TNN,
     SeparableDimNetworkGELU,
     TNNTrainer,
-    apply_dirichlet_bd,
     generate_quad_points,
     int_tnn_L2,
 )
@@ -69,14 +68,9 @@ class LaplacePDELoss(nn.Module):
     def forward(self):
         residual = -self.tnn.laplace() - self.f_tnn
 
-        # L2损失
-        return int_tnn_L2(residual, self.quad_points, self.quad_weights)
-
-
-def get_true_solution(x):
-    """在x处计算真解: (batch_size, dim) -> (batch_size,)"""
-    # prod(sin(pi * x_i))
-    return torch.prod(torch.sin(PI * x), dim=-1)
+        return int_tnn_L2(
+            residual, self.quad_points, self.quad_weights
+        )  # L2损失
 
 
 def solve():
@@ -85,21 +79,22 @@ def solve():
     # 1. 模型构建
     # 边界条件: u=0 在[0,1]^d的所有边界上
     # 这与sin(pi*x)匹配, 它在0和1处为0.
-    boundary_spec: list[tuple[float | None, float | None]] = [
+    boundary: list[tuple[float | None, float | None]] = [
         (0.0, 1.0) for _ in range(DIM)
     ]
 
-    # 应用边界条件的基础网络
-    base_func = SeparableDimNetworkGELU(dim=DIM, rank=RANK).to(
-        DEVICE, dtype=DTYPE
+    # 满足强制边界条件的基础网络
+    u_tnn_func = (
+        SeparableDimNetworkGELU(dim=DIM, rank=RANK)
+        .apply_dirichlet_bd(boundary)
+        .to(DEVICE, dtype=DTYPE)
     )
-    bounded_func = apply_dirichlet_bd(boundary_spec)(base_func)
 
-    model = TNN(dim=DIM, rank=RANK, func=bounded_func).to(DEVICE, dtype=DTYPE)
+    u_tnn = TNN(dim=DIM, rank=RANK, func=u_tnn_func).to(DEVICE, dtype=DTYPE)
 
     # 2. 损失函数定义
     bounds = [(0.0, 1.0) for _ in range(DIM)]
-    loss_fn = LaplacePDELoss(model, bounds)
+    loss_fn = LaplacePDELoss(u_tnn, bounds)
 
     # 3. 训练
     # 使用简化的训练计划进行演示
@@ -109,22 +104,28 @@ def solve():
     ]
 
     print("开始训练...")
-    trainer = TNNTrainer(model, loss_fn, print_interval=200)
+    trainer = TNNTrainer(u_tnn, loss_fn, print_interval=200)
     trainer.multi_phase(phases)
     print("训练完成. ")
 
-    return model
+    return u_tnn
 
 
-def evaluate(model):
+def evaluate(u_tnn: TNN):
     print("\n评估误差...")
     n_test = 1000
     # [0,1]^d中的随机点
     test_points = torch.rand((n_test, DIM), device=DEVICE, dtype=DTYPE)
 
+    # 构造真解TNN: u(x) = prod(sin(πx_i))
+    # SourceTermNet恰好实现了该逻辑
+    u_true_tnn = TNN(dim=DIM, rank=1, func=SourceTermNet(DIM)).to(
+        DEVICE, dtype=DTYPE
+    )
+
     with torch.no_grad():
-        u_pred = model(test_points)
-        u_true = get_true_solution(test_points)
+        u_pred = u_tnn(test_points)
+        u_true = u_true_tnn(test_points)
 
         # 相对L2误差
         diff = u_pred - u_true
@@ -134,5 +135,5 @@ def evaluate(model):
 
 
 if __name__ == "__main__":
-    model = solve()
-    evaluate(model)
+    u_tnn = solve()
+    evaluate(u_tnn)
