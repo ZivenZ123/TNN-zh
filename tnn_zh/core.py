@@ -27,6 +27,7 @@ u(x₁, x₂, ..., x_dim) = Σ_{r=1}^{rank} θᵣ * Π_{d=1}^{dim} subtnn_d^{(r)
 """
 
 import math
+import warnings
 from collections.abc import Callable
 
 import torch
@@ -876,7 +877,7 @@ class TNN(nn.Module):
             loss_fn: 损失函数, 返回标量Tensor或tuple
             phases: 训练阶段配置列表, 每个元素是一个字典, 包含:
                 - 'type': 'adam' 或 'lbfgs'
-                - 'lr': 学习率
+                - 'lr': 学习率 (作为Warmup Cosine调度器的峰值学习率)
                 - 'epochs': 训练轮数
                 - 其他参数 (如 grad_clip, weight_decay 等)
 
@@ -901,6 +902,37 @@ class TNN(nn.Module):
                     eps=phase_config.get("eps", 1e-8),
                 )
 
+                # 强制使用 Warmup + Cosine Annealing 调度器
+                # Warmup: 前5%的步数 (或至少100步)
+                warmup_steps = max(int(epochs * 0.05), 100)
+                cosine_steps = max(epochs - warmup_steps, 1)
+
+                # 1. Linear Warmup: lr 从 0 增加到 base_lr
+                scheduler_warmup = optim.lr_scheduler.LinearLR(
+                    optimizer,
+                    start_factor=1e-6,
+                    end_factor=1.0,
+                    total_iters=warmup_steps,
+                )
+
+                # 2. Cosine Annealing: lr 从 base_lr 衰减到 0
+                scheduler_cosine = optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer, T_max=cosine_steps, eta_min=0.0
+                )
+
+                # 3. 串联调度器 (过滤掉 epoch deprecation warning)
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=".*epoch parameter in `scheduler.step\\(\\)`.*",
+                        category=UserWarning,
+                    )
+                    scheduler = optim.lr_scheduler.SequentialLR(
+                        optimizer,
+                        schedulers=[scheduler_warmup, scheduler_cosine],
+                        milestones=[warmup_steps],
+                    )
+
                 grad_clip = phase_config.get("grad_clip", None)
 
                 with tqdm(range(epochs), desc=phase_desc) as pbar:
@@ -921,10 +953,22 @@ class TNN(nn.Module):
 
                         optimizer.step()
 
+                        # 更新学习率 (抑制deprecation warning)
+                        with warnings.catch_warnings():
+                            warnings.filterwarnings(
+                                "ignore",
+                                message=".*epoch parameter in `scheduler.step\\(\\)`.*",
+                                category=UserWarning,
+                            )
+                            scheduler.step()
+
                         if step % 10 == 0 or step == epochs - 1:
                             loss_val = loss.item()
                             losses.append(loss_val)
-                            pbar.set_postfix(loss=f"{loss_val:.2e}")
+                            current_lr = scheduler.get_last_lr()[0]
+                            pbar.set_postfix(
+                                loss=f"{loss_val:.2e}", lr=f"{current_lr:.2e}"
+                            )
 
             elif phase_type == "lbfgs":
                 optimizer = optim.LBFGS(

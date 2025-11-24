@@ -97,14 +97,13 @@ def solve():
     loss_fn = LaplacePDELoss(u_tnn, bounds)
 
     # 3. 训练
-    # 使用简化的训练计划进行演示
-    phases = [
-        {"type": "adam", "lr": 0.01, "epochs": 1000, "grad_clip": 1.0},
-        {"type": "adam", "lr": 0.001, "epochs": 1000, "grad_clip": 0.5},
-    ]
-
     print("开始训练...")
-    u_tnn.fit(loss_fn, phases)
+    u_tnn.fit(
+        loss_fn=loss_fn,
+        phases=[
+            {"type": "adam", "lr": 0.01, "epochs": 2000, "grad_clip": 1.0}
+        ],
+    )
     print("训练完成. ")
 
     return u_tnn

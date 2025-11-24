@@ -140,11 +140,12 @@ def solve():
 
     # 训练 u 拟合初始条件
     ic_loss = InitialConditionLoss(u_tnn, SPATIAL_DIM)
-    phases_u = [
-        {"type": "adam", "lr": 0.01, "epochs": 1000},
-        {"type": "adam", "lr": 0.001, "epochs": 500},
-    ]
-    u_tnn.fit(ic_loss, phases_u)
+    u_tnn.fit(
+        loss_fn=ic_loss,
+        phases=[
+            {"type": "adam", "lr": 0.001, "epochs": 15000},
+        ],
+    )
 
     # ===== 第二阶段：求解PDE =====
     print("\n阶段2: 求解PDE，训练修正项 v...")
@@ -164,11 +165,12 @@ def solve():
 
     # 训练 v 使得 u+v 满足PDE
     pde_loss = HeatPDELoss(v_tnn, u_tnn, SPATIAL_DIM)
-    phases_v = [
-        {"type": "adam", "lr": 0.01, "epochs": 1000},
-        {"type": "adam", "lr": 0.001, "epochs": 1000},
-    ]
-    v_tnn.fit(pde_loss, phases_v)
+    v_tnn.fit(
+        loss_fn=pde_loss,
+        phases=[
+            {"type": "adam", "lr": 0.01, "epochs": 1000},
+        ],
+    )
 
     print("训练完成.")
 

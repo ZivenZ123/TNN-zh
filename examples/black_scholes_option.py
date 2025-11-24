@@ -153,8 +153,7 @@ def solve():
     u_tnn = TNN(3, rank, u_func).to(DEVICE, DTYPE)
 
     loss_fn = BCLoss(u_tnn)
-    phases = [{"type": "adam", "lr": 0.01, "epochs": 1000}]
-    u_tnn.fit(loss_fn, phases)
+    u_tnn.fit(loss_fn, phases=[{"type": "adam", "lr": 0.01, "epochs": 1000}])
 
     # 2. 学习修正项 v (使得 u+v 满足PDE)
     print("Phase 2: 求解PDE...")
@@ -171,11 +170,7 @@ def solve():
     v_tnn = TNN(3, rank, v_func).to(DEVICE, DTYPE)
 
     loss_fn = PDELoss(v_tnn, u_tnn)
-    phases = [
-        {"type": "adam", "lr": 0.005, "epochs": 2000},
-        {"type": "adam", "lr": 0.0005, "epochs": 2000},
-    ]
-    v_tnn.fit(loss_fn, phases)
+    v_tnn.fit(loss_fn, phases=[{"type": "adam", "lr": 0.005, "epochs": 4000}])
 
     # 返回完整解
     def solution(x):
