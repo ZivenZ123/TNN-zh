@@ -391,6 +391,24 @@ class TNN(nn.Module):
                 else:
                     raise NotImplementedError("子函数不支持forward_with_grad2")
 
+            def forward_all_grad2(self, x):
+                """
+                同时计算所有维度的二阶导数
+                对于 u+v: 所有导数都是对应导数的和
+                """
+                if hasattr(self.func1, "forward_all_grad2") and hasattr(
+                    self.func2, "forward_all_grad2"
+                ):
+                    out1, grad1, grad2_1 = self.func1.forward_all_grad2(x)
+                    out2, grad2, grad2_2 = self.func2.forward_all_grad2(x)
+                    return (
+                        torch.cat([out1, out2], dim=1),
+                        torch.cat([grad1, grad2], dim=1),
+                        torch.cat([grad2_1, grad2_2], dim=1),
+                    )
+                else:
+                    raise NotImplementedError("子函数不支持forward_all_grad2")
+
         concat_func = ConcatFunc(self.func, other.func)
 
         class CatThetaModule(ThetaModule):
@@ -1562,6 +1580,8 @@ def wrap_1d_func_as_tnn(dim: int, target_dim: int):
                 output[:, 0, self.target_dim] = func_output.squeeze(-1)
 
                 return output
+
+            # todo: 没有设计求导方法, 调用grad、grad2、laplace的时候可能会出问题
 
         wrapped_func = WrappedFunc(func, target_dim, dim)
 
