@@ -45,7 +45,7 @@ cd TNN-zh
 uv sync
 
 # 3. 运行示例
-uv run examples/laplace_nd.py
+uv run examples/poisson_nd.py
 ```
 
 ---
@@ -80,50 +80,72 @@ grad = tnn.grad(grad_dim=0)      # 对第0维求导
 laplace = tnn.laplace()          # 计算 Laplacian (Δu)
 ```
 
-### 2. 实战：求解 5 维 Laplace 方程
+### 2. 实战：求解 5 维 Poisson 方程
 
-求解方程 $-\Delta u = f$ 在 $[0,1]^5$ 上。以下演示如何利用 TNN 和 PyTorch 优化器求解高维 PDE。
+求解方程 $-\Delta u = f$ 在 $[0,1]^5$ 上, 真解为 $u(x) = \prod_i \sin(\pi x_i)$。
 
 ```python
 import torch
+import torch.nn as nn
 import math
 from tnn_zh import TNN, SeparableDimNetworkGELU, generate_quad_points, int_tnn_L2
 
 # 配置
 DIM = 5
 RANK = 10
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+DTYPE = torch.float64
+PI = math.pi
 
-# 1. 构建模型 (应用 Dirichlet 零边界条件)
-boundary = [(0.0, 1.0) for _ in range(DIM)]
-func = SeparableDimNetworkGELU(dim=DIM, rank=RANK).apply_dirichlet_bd(boundary)
-u_tnn = TNN(dim=DIM, rank=RANK, func=func).to(DEVICE)
-
-# 2. 准备积分点 (用于计算 PDE Loss)
-quad_points, quad_weights = generate_quad_points(
-    domain_bounds=boundary, n_quad_points=16, device=DEVICE
-)
-
-# 3. 定义 PDE 源项 f(x) (此处略去 f 的具体构造，假设为已知 TNN f_tnn)
-# f_tnn = ... 
-
-# 4. 训练 (使用 TNN.fit)
-def loss_fn():
-    # 计算残差: R = -Δu - f
-    # u_tnn.laplace() 返回一个新的 TNN 对象表示 Δu
-    residual = -u_tnn.laplace() - f_tnn
+# 1. 定义源项 f(x) = d * π^2 * prod(sin(πx_i))
+class SourceFunc(nn.Module):
+    """将源项 f(x) 表示为秩1的TNN分量"""
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
     
-    # 计算 Loss: ||R||^2
-    return int_tnn_L2(residual, quad_points, quad_weights)
+    def forward(self, x):
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+        val = torch.sin(PI * x)  # 每个维度计算 sin(πx)
+        return val.unsqueeze(1)  # 添加 rank 维度
 
-# 训练配置: 支持 Adam, LBFGS 等多种优化器
-phases = [
-    {"type": "adam", "lr": 0.01, "epochs": 1000},
-    {"type": "adam", "lr": 0.001, "epochs": 1000},
-]
+# 2. 定义 PDE 损失函数
+class PoissonPDELoss(nn.Module):
+    def __init__(self, tnn_model, domain_bounds):
+        super().__init__()
+        self.tnn = tnn_model
+        
+        # 生成积分点
+        self.quad_points, self.quad_weights = generate_quad_points(
+            domain_bounds, device=DEVICE, dtype=DTYPE
+        )
+        
+        # 构造源项 TNN
+        source_func = SourceFunc(DIM)
+        self.f_tnn = (DIM * PI**2) * TNN(
+            dim=DIM, rank=1, func=source_func
+        ).to(DEVICE, dtype=DTYPE)
+    
+    def forward(self):
+        residual = -self.tnn.laplace() - self.f_tnn  # 计算残差: -Δu - f
+        return int_tnn_L2(residual, self.quad_points, self.quad_weights)
 
-# 开始训练
-u_tnn.fit(loss_fn, phases)
+# 3. 构建模型 (应用 Dirichlet 零边界条件)
+boundary = [(0.0, 1.0) for _ in range(DIM)]
+u_tnn_func = (
+    SeparableDimNetworkGELU(dim=DIM, rank=RANK)
+    .apply_dirichlet_bd(boundary)
+    .to(DEVICE, dtype=DTYPE)
+)
+u_tnn = TNN(dim=DIM, rank=RANK, func=u_tnn_func).to(DEVICE, dtype=DTYPE)
+
+# 4. 训练
+loss_fn = PoissonPDELoss(u_tnn, boundary)
+u_tnn.fit(
+    loss_fn=loss_fn,
+    phases=[{"type": "adam", "lr": 0.01, "epochs": 2000, "grad_clip": 1.0}]
+)
 ```
 
-> 完整代码请参考 `examples/laplace_nd.py`。
+> 完整代码请参考 `examples/poisson_nd.py`。

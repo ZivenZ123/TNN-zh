@@ -49,8 +49,6 @@ class BCLoss(nn.Module):
         bounds = [BOUNDS[0], BOUNDS[2]]
         self.pts1, self.w1 = generate_quad_points(
             bounds,
-            n_quad_points=20,
-            sub_intervals=10,
             device=DEVICE,
             dtype=DTYPE,
         )
@@ -59,8 +57,6 @@ class BCLoss(nn.Module):
         bounds_k = [(K - 0.1, K + 0.1), BOUNDS[2]]
         self.pts2, self.w2 = generate_quad_points(
             bounds_k,
-            n_quad_points=20,
-            sub_intervals=10,
             device=DEVICE,
             dtype=DTYPE,
         )
@@ -91,8 +87,6 @@ class PDELoss(nn.Module):
 
         self.pts, self.w = generate_quad_points(
             BOUNDS,
-            n_quad_points=16,
-            sub_intervals=10,
             device=DEVICE,
             dtype=DTYPE,
         )

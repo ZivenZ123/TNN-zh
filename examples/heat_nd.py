@@ -22,18 +22,17 @@ from tnn_zh import (
     int_tnn_L2,
 )
 
-# 全局配置
-SPATIAL_DIM = 5  # 空间维度 d
+# 配置
+SPATIAL_DIM = 5
 RANK = 10
 NU = 0.1  # 扩散系数
 TIME_END = 0.5
-
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 PI = math.pi
 
 
-class SourceTermNet(nn.Module):
+class SourceFunc(nn.Module):
     """辅助网络, 将 prod(sin(π*x_i)) 表示为秩1的TNN分量"""
 
     def __init__(self, dim):
@@ -45,62 +44,51 @@ class SourceTermNet(nn.Module):
         # 返回形状: (n_1d, rank=1, dim)
         if x.dim() == 1:
             x = x.unsqueeze(0)
-
-        # 每个维度计算sin(pi * x)
-        # val: (n_1d, dim)
         val = torch.sin(PI * x)
-
-        # 添加rank维度 -> (n_1d, 1, dim)
         return val.unsqueeze(1)
 
 
 class InitialConditionLoss(nn.Module):
     """初始条件损失: ||u(x,0) - prod(sin(π*x_i))||²"""
 
-    def __init__(self, u_tnn: TNN, spatial_dim: int):
+    def __init__(self, u_tnn: TNN):
         super().__init__()
         self.u_tnn = u_tnn
-        self.spatial_dim = spatial_dim
 
         # 在 t=0 处的积分点
-        bounds = [(0.0, 1.0)] * spatial_dim
+        domain_bounds = [(0.0, 1.0)] * SPATIAL_DIM
         self.quad_points, self.quad_weights = generate_quad_points(
-            bounds,
-            n_quad_points=16,
-            sub_intervals=10,
+            domain_bounds,
             device=DEVICE,
             dtype=DTYPE,
         )
 
         # 目标函数：prod(sin(π*x_i))
-        target_func = SourceTermNet(spatial_dim)
-        self.target = TNN(dim=spatial_dim, rank=1, func=target_func).to(
+        target_func = SourceFunc(SPATIAL_DIM)
+        self.target = TNN(dim=SPATIAL_DIM, rank=1, func=target_func).to(
             DEVICE, DTYPE
         )
 
     def forward(self):
         # 提取 t=0 切片
-        u_0 = self.u_tnn.slice(fixed_dims={self.spatial_dim: 0.0})
+        u_0: TNN = self.u_tnn.slice(fixed_dims={SPATIAL_DIM: 0.0})
 
-        diff = u_0 - self.target
+        diff: TNN = u_0 - self.target
         return int_tnn_L2(diff, self.quad_points, self.quad_weights)
 
 
 class HeatPDELoss(nn.Module):
     """PDE残差损失"""
 
-    def __init__(self, v_tnn: TNN, u_tnn: TNN, spatial_dim: int):
+    def __init__(self, v_tnn: TNN, u_tnn: TNN):
         super().__init__()
         self.v_tnn = v_tnn
         self.u_tnn = u_tnn  # 固定的初始条件拟合
-        self.spatial_dim = spatial_dim
 
         # 生成积分点：空间+时间
-        bounds = [(0.0, 1.0)] * spatial_dim + [(0.0, TIME_END)]
+        bounds = [(0.0, 1.0)] * SPATIAL_DIM + [(0.0, TIME_END)]
         self.quad_points, self.quad_weights = generate_quad_points(
             bounds,
-            n_quad_points=16,
-            sub_intervals=10,
             device=DEVICE,
             dtype=DTYPE,
         )
@@ -110,11 +98,9 @@ class HeatPDELoss(nn.Module):
         u = self.u_tnn + self.v_tnn
 
         # 计算时间导数和空间拉普拉斯
-        u_t = u.grad(self.spatial_dim)
+        u_t = u.grad(SPATIAL_DIM)
         laplace_all = u.laplace()
-        laplace_spatial = laplace_all - u.grad2(
-            self.spatial_dim, self.spatial_dim
-        )
+        laplace_spatial = laplace_all - u.grad2(SPATIAL_DIM, SPATIAL_DIM)
 
         # PDE残差
         residual = u_t - NU * laplace_spatial
@@ -139,7 +125,7 @@ def solve():
     u_tnn = TNN(dim=SPATIAL_DIM + 1, rank=RANK, func=u_func).to(DEVICE, DTYPE)
 
     # 训练 u 拟合初始条件
-    ic_loss = InitialConditionLoss(u_tnn, SPATIAL_DIM)
+    ic_loss = InitialConditionLoss(u_tnn)
     u_tnn.fit(
         loss_fn=ic_loss,
         phases=[
@@ -164,7 +150,7 @@ def solve():
     v_tnn = TNN(dim=SPATIAL_DIM + 1, rank=RANK, func=v_func).to(DEVICE, DTYPE)
 
     # 训练 v 使得 u+v 满足PDE
-    pde_loss = HeatPDELoss(v_tnn, u_tnn, SPATIAL_DIM)
+    pde_loss = HeatPDELoss(v_tnn, u_tnn)
     v_tnn.fit(
         loss_fn=pde_loss,
         phases=[
@@ -172,13 +158,7 @@ def solve():
         ],
     )
 
-    print("训练完成.")
-
-    # 返回组合解
-    def solution_tnn(x):
-        return u_tnn(x) + v_tnn(x)
-
-    return solution_tnn
+    return u_tnn + v_tnn
 
 
 def evaluate(solution_fn):
@@ -216,5 +196,5 @@ def evaluate(solution_fn):
 
 
 if __name__ == "__main__":
-    sol = solve()
-    evaluate(sol)
+    solution_tnn = solve()
+    evaluate(solution_tnn)

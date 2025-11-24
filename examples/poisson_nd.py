@@ -1,5 +1,5 @@
 """
-使用TNN求解高维Laplace方程
+使用TNN求解高维Poisson方程
 方程: -Δu = f 在 [0,1]^d 上
 真解: u(x) = prod(sin(πx_i))
 源项: f(x) = d * π^2 * prod(sin(πx_i))
@@ -24,7 +24,7 @@ DTYPE = torch.float64
 PI = math.pi
 
 
-class SourceTermNet(nn.Module):
+class SourceFunc(nn.Module):
     """辅助网络, 将f(x)表示为秩1的TNN分量"""
 
     def __init__(self, dim):
@@ -36,75 +36,58 @@ class SourceTermNet(nn.Module):
         # 返回形状: (n_1d, rank=1, dim)
         if x.dim() == 1:
             x = x.unsqueeze(0)
-
-        # 每个维度计算sin(pi * x)
-        # val: (n_1d, dim)
         val = torch.sin(PI * x)
-
-        # 添加rank维度 -> (n_1d, 1, dim)
         return val.unsqueeze(1)
 
 
-class LaplacePDELoss(nn.Module):
-    def __init__(self, tnn_model: TNN, domain_bounds):
+class PoissonPDELoss(nn.Module):
+    def __init__(self, tnn_model: TNN):
         super().__init__()
-        self.tnn = tnn_model
+        self.tnn: TNN = tnn_model
 
         # 生成积分点
+        domain_bounds = [(0.0, 1.0) for _ in range(DIM)]
         self.quad_points, self.quad_weights = generate_quad_points(
             domain_bounds,
-            n_quad_points=16,
-            sub_intervals=10,
             device=DEVICE,
             dtype=DTYPE,
         )
 
-        # 将f(x)构造为TNN
-        source_func = SourceTermNet(DIM)
-        self.f_tnn = (DIM * PI**2) * TNN(dim=DIM, rank=1, func=source_func).to(
-            DEVICE, dtype=DTYPE
-        )
+        # 将f(x)构造为tnn
+        source_func = SourceFunc(DIM)
+        self.f_tnn: TNN = (DIM * PI**2) * TNN(
+            dim=DIM, rank=1, func=source_func
+        ).to(DEVICE, dtype=DTYPE)
 
     def forward(self):
-        residual = -self.tnn.laplace() - self.f_tnn
-
-        return int_tnn_L2(
-            residual, self.quad_points, self.quad_weights
-        )  # L2损失
+        residual: TNN = -self.tnn.laplace() - self.f_tnn
+        return int_tnn_L2(residual, self.quad_points, self.quad_weights)
 
 
 def solve():
-    print(f"求解{DIM}维Laplace方程...")
+    print(f"求解{DIM}维Poisson方程...")
 
-    # 1. 模型构建
-    # 边界条件: u=0 在[0,1]^d的所有边界上
-    # 这与sin(pi*x)匹配, 它在0和1处为0.
-    boundary: list[tuple[float | None, float | None]] = [
-        (0.0, 1.0) for _ in range(DIM)
-    ]
-
-    # 满足强制边界条件的基础网络
+    # 创建满足强制边界条件的func网络
+    boundary_conditions = [(0.0, 1.0) for _ in range(DIM)]
     u_tnn_func = (
         SeparableDimNetworkGELU(dim=DIM, rank=RANK)
-        .apply_dirichlet_bd(boundary)
+        .apply_dirichlet_bd(boundary_conditions)
         .to(DEVICE, dtype=DTYPE)
     )
 
-    u_tnn = TNN(dim=DIM, rank=RANK, func=u_tnn_func).to(DEVICE, dtype=DTYPE)
+    # 构建tnn模型
+    u_tnn: TNN = TNN(dim=DIM, rank=RANK, func=u_tnn_func).to(
+        DEVICE, dtype=DTYPE
+    )
 
-    # 2. 损失函数定义
-    bounds = [(0.0, 1.0) for _ in range(DIM)]
-    loss_fn = LaplacePDELoss(u_tnn, bounds)
+    # 实例化loss
+    loss_fn = PoissonPDELoss(u_tnn)
 
-    # 3. 训练
-    print("开始训练...")
+    # 训练
     u_tnn.fit(
         loss_fn=loss_fn,
-        phases=[
-            {"type": "adam", "lr": 0.01, "epochs": 2000, "grad_clip": 1.0}
-        ],
+        phases=[{"type": "adam", "lr": 0.01, "epochs": 2000}],
     )
-    print("训练完成. ")
 
     return u_tnn
 
@@ -115,9 +98,8 @@ def evaluate(u_tnn: TNN):
     # [0,1]^d中的随机点
     test_points = torch.rand((n_test, DIM), device=DEVICE, dtype=DTYPE)
 
-    # 构造真解TNN: u(x) = prod(sin(πx_i))
-    # SourceTermNet恰好实现了该逻辑
-    u_true_tnn = TNN(dim=DIM, rank=1, func=SourceTermNet(DIM)).to(
+    # 构造真解TNN
+    u_true_tnn: TNN = TNN(dim=DIM, rank=1, func=SourceFunc(DIM)).to(
         DEVICE, dtype=DTYPE
     )
 
@@ -125,7 +107,7 @@ def evaluate(u_tnn: TNN):
         u_pred = u_tnn(test_points)
         u_true = u_true_tnn(test_points)
 
-        # 相对L2误差
+        # 计算相对L2误差
         diff = u_pred - u_true
         l2_err = torch.norm(diff) / torch.norm(u_true)
 
@@ -133,5 +115,5 @@ def evaluate(u_tnn: TNN):
 
 
 if __name__ == "__main__":
-    u_tnn = solve()
+    u_tnn: TNN = solve()
     evaluate(u_tnn)
