@@ -47,25 +47,26 @@ class GaussLegendre:
     """
 
     def _standard_gauss_points(
-        self, n_points: int
+        self, n_points: int, dtype: torch.dtype = DTYPE
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         获取标准区间[-1,1]上的高斯-勒让德积分点和权重
 
         Args:
             n_points: 积分点数量
+            dtype: 数据类型,默认为torch.float32
 
         Returns:
             (积分点, 权重)
         """
         points, weights = np.polynomial.legendre.leggauss(n_points)
         return (
-            torch.tensor(points, dtype=DTYPE),
-            torch.tensor(weights, dtype=DTYPE),
+            torch.tensor(points, dtype=dtype),
+            torch.tensor(weights, dtype=dtype),
         )
 
     def gauss_points(
-        self, n_points: int, a: float, b: float
+        self, n_points: int, a: float, b: float, dtype: torch.dtype = DTYPE
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         获取指定区间[a,b]上的高斯-勒让德积分点和权重
@@ -74,11 +75,12 @@ class GaussLegendre:
             n_points: 积分点数量
             a: 积分区间左端点
             b: 积分区间右端点
+            dtype: 数据类型,默认为torch.float32
 
         Returns:
             (变换后的积分点, 变换后的权重)
         """
-        points, weights = self._standard_gauss_points(n_points)
+        points, weights = self._standard_gauss_points(n_points, dtype=dtype)
         scale = (b - a) * 0.5
         offset = (a + b) * 0.5
         transformed_points = points * scale + offset
@@ -91,6 +93,7 @@ class GaussLegendre:
         a: float,
         b: float,
         sub_intervals: int = 1,
+        dtype: torch.dtype = DTYPE,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         获取指定区间[a,b]上的高斯-勒让德积分点和权重,支持区间细分
@@ -100,15 +103,16 @@ class GaussLegendre:
             a: 积分区间左端点
             b: 积分区间右端点
             sub_intervals: 子区间数量,默认为1(不细分)
+            dtype: 数据类型,默认为torch.float32
 
         Returns:
             (合并后的积分点, 合并后的权重)
         """
         if sub_intervals == 1:
-            return self.gauss_points(n_points, a, b)
+            return self.gauss_points(n_points, a, b, dtype=dtype)
 
         standard_points, standard_weights = self._standard_gauss_points(
-            n_points
+            n_points, dtype=dtype
         )
 
         sub_interval_length = (b - a) / sub_intervals
@@ -135,6 +139,7 @@ def generate_quad_points(
     n_quad_points: int = 16,
     sub_intervals: int = 10,
     device: torch.device | None = None,
+    dtype: torch.dtype = DTYPE,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     为各维度生成高斯积分点和权重(张量积形式)
@@ -147,6 +152,7 @@ def generate_quad_points(
         n_quad_points: 积分点数(所有维度共用)
         sub_intervals: 子区间数量(所有维度共用)
         device: 目标设备,默认为None(CPU)
+        dtype: 数据类型,默认为torch.float32
 
     Returns:
         (quad_points, quad_weights):
@@ -163,7 +169,7 @@ def generate_quad_points(
     for d in range(dim):
         a, b = domain_bounds[d]
         points, weights = gl.gauss_points_with_subdivision(
-            n_quad_points, a, b, sub_intervals
+            n_quad_points, a, b, sub_intervals, dtype=dtype
         )
         if device is not None:
             points = points.to(device)
@@ -176,7 +182,7 @@ def generate_quad_points(
     # 注意: 权重与具体的[a,b]区间无关,只与区间长度有关
     # 这里使用标准区间[0,1]生成权重结构
     _, quad_weights = gl.gauss_points_with_subdivision(
-        n_quad_points, 0, 1, sub_intervals
+        n_quad_points, 0, 1, sub_intervals, dtype=dtype
     )
     if device is not None:
         quad_weights = quad_weights.to(device)

@@ -69,6 +69,7 @@ class InitialConditionLoss(nn.Module):
             n_quad_points=16,
             sub_intervals=10,
             device=DEVICE,
+            dtype=DTYPE,
         )
 
         # 目标函数：prod(sin(π*x_i))
@@ -101,6 +102,7 @@ class HeatPDELoss(nn.Module):
             n_quad_points=16,
             sub_intervals=10,
             device=DEVICE,
+            dtype=DTYPE,
         )
 
     def forward(self):
