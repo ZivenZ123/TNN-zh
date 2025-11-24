@@ -48,13 +48,21 @@ class BCLoss(nn.Module):
         # 积分点: S在[0, S_max], sigma在[sigma_min, sigma_max]
         bounds = [BOUNDS[0], BOUNDS[2]]
         self.pts1, self.w1 = generate_quad_points(
-            bounds, n_quad_points=20, sub_intervals=10, device=DEVICE, dtype=DTYPE
+            bounds,
+            n_quad_points=20,
+            sub_intervals=10,
+            device=DEVICE,
+            dtype=DTYPE,
         )
 
         # 在K附近加密采样
         bounds_k = [(K - 0.1, K + 0.1), BOUNDS[2]]
         self.pts2, self.w2 = generate_quad_points(
-            bounds_k, n_quad_points=20, sub_intervals=10, device=DEVICE, dtype=DTYPE
+            bounds_k,
+            n_quad_points=20,
+            sub_intervals=10,
+            device=DEVICE,
+            dtype=DTYPE,
         )
 
         # 目标函数 g(S) = max(S-K, 0)
@@ -82,7 +90,11 @@ class PDELoss(nn.Module):
         self.u_tnn = u_tnn  # 已知边界部分 (参数固定)
 
         self.pts, self.w = generate_quad_points(
-            BOUNDS, n_quad_points=16, sub_intervals=10, device=DEVICE, dtype=DTYPE
+            BOUNDS,
+            n_quad_points=16,
+            sub_intervals=10,
+            device=DEVICE,
+            dtype=DTYPE,
         )
 
         # 系数函数
