@@ -112,39 +112,40 @@ class SourceFunc(nn.Module):
 
 # 2. 定义 PDE 损失函数
 class PoissonPDELoss(nn.Module):
-    def __init__(self, tnn_model, domain_bounds):
+    def __init__(self, tnn_model: TNN):
         super().__init__()
-        self.tnn = tnn_model
+        self.tnn: TNN = tnn_model
         
         # 生成积分点
+        domain_bounds = [(0.0, 1.0) for _ in range(DIM)]
         self.quad_points, self.quad_weights = generate_quad_points(
             domain_bounds, device=DEVICE, dtype=DTYPE
         )
         
         # 构造源项 TNN
         source_func = SourceFunc(DIM)
-        self.f_tnn = (DIM * PI**2) * TNN(
+        self.f_tnn: TNN = (DIM * PI**2) * TNN(
             dim=DIM, rank=1, func=source_func
         ).to(DEVICE, dtype=DTYPE)
     
     def forward(self):
-        residual = -self.tnn.laplace() - self.f_tnn  # 计算残差: -Δu - f
+        residual: TNN = -self.tnn.laplace() - self.f_tnn
         return int_tnn_L2(residual, self.quad_points, self.quad_weights)
 
 # 3. 构建模型 (应用 Dirichlet 零边界条件)
-boundary = [(0.0, 1.0) for _ in range(DIM)]
+boundary_conditions = [(0.0, 1.0) for _ in range(DIM)]
 u_tnn_func = (
     SeparableDimNetworkGELU(dim=DIM, rank=RANK)
-    .apply_dirichlet_bd(boundary)
+    .apply_dirichlet_bd(boundary_conditions)
     .to(DEVICE, dtype=DTYPE)
 )
 u_tnn = TNN(dim=DIM, rank=RANK, func=u_tnn_func).to(DEVICE, dtype=DTYPE)
 
 # 4. 训练
-loss_fn = PoissonPDELoss(u_tnn, boundary)
+loss_fn = PoissonPDELoss(u_tnn)
 u_tnn.fit(
     loss_fn=loss_fn,
-    phases=[{"type": "adam", "lr": 0.01, "epochs": 2000, "grad_clip": 1.0}]
+    phases=[{"type": "adam", "lr": 0.01, "epochs": 2000}]
 )
 ```
 
