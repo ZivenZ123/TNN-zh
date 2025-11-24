@@ -29,7 +29,7 @@ NU = 0.1  # 扩散系数
 TIME_END = 0.5
 
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-DTYPE = torch.float32
+DTYPE = torch.float64
 PI = math.pi
 
 

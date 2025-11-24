@@ -20,7 +20,7 @@ from tnn_zh import (
 DIM = 5
 RANK = 10
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-DTYPE = torch.float32
+DTYPE = torch.float64
 PI = math.pi
 
 
