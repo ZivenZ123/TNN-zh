@@ -20,7 +20,7 @@ from tnn_zh import (
 
 # 配置
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-DTYPE = torch.float32
+DTYPE = torch.float64
 
 # BS参数
 K = 0.5  # 执行价格
@@ -189,7 +189,7 @@ def evaluate(model):
     n_test = 5000
 
     # 随机采样测试点
-    pts = torch.rand(n_test, 3, device=DEVICE)
+    pts = torch.rand(n_test, 3, device=DEVICE, dtype=DTYPE)
     pts[:, 0] = pts[:, 0] * S_max  # S
     pts[:, 1] = pts[:, 1] * T  # t
     pts[:, 2] = pts[:, 2] * (sigma_max - sigma_min) + sigma_min  # sigma
