@@ -63,18 +63,17 @@ class InitialConditionLoss(nn.Module):
             dtype=DTYPE,
         )
 
-        # 目标函数：prod(sin(π*x_i))
+        # 目标函数: prod(sin(π*x_i))
         target_func = SourceFunc(SPATIAL_DIM)
-        self.target = TNN(dim=SPATIAL_DIM, rank=1, func=target_func).to(
+        self.target: TNN = TNN(dim=SPATIAL_DIM, rank=1, func=target_func).to(
             DEVICE, DTYPE
         )
 
     def forward(self):
         # 提取 t=0 切片
-        u_0: TNN = self.u_tnn.slice(fixed_dims={SPATIAL_DIM: 0.0})
-
-        diff: TNN = u_0 - self.target
-        return int_tnn_L2(diff, self.quad_points, self.quad_weights)
+        u_0: TNN = self.u_tnn.slice(fixed_dims={-1: 0.0})
+        residual: TNN = u_0 - self.target
+        return int_tnn_L2(residual, self.quad_points, self.quad_weights)
 
 
 class HeatPDELoss(nn.Module):
@@ -85,74 +84,73 @@ class HeatPDELoss(nn.Module):
         self.v_tnn = v_tnn
         self.u_tnn = u_tnn  # 固定的初始条件拟合
 
-        # 生成积分点：空间+时间
-        bounds = [(0.0, 1.0)] * SPATIAL_DIM + [(0.0, TIME_END)]
+        # 生成积分点: 空间+时间
+        domain_bounds = [(0.0, 1.0)] * SPATIAL_DIM + [(0.0, TIME_END)]
         self.quad_points, self.quad_weights = generate_quad_points(
-            bounds,
+            domain_bounds,
             device=DEVICE,
             dtype=DTYPE,
         )
 
     def forward(self):
         # 组合解 u = u_tnn + v_tnn
-        u = self.u_tnn + self.v_tnn
+        u: TNN = self.u_tnn + self.v_tnn
 
         # 计算时间导数和空间拉普拉斯
-        u_t = u.grad(SPATIAL_DIM)
-        laplace_all = u.laplace()
-        laplace_spatial = laplace_all - u.grad2(SPATIAL_DIM, SPATIAL_DIM)
+        u_t: TNN = u.grad(grad_dim=-1)
+        laplace_spatial: TNN = u.laplace() - u.grad2(dim1=-1, dim2=-1)
 
-        # PDE残差
-        residual = u_t - NU * laplace_spatial
-
+        residual: TNN = u_t - NU * laplace_spatial
         return int_tnn_L2(residual, self.quad_points, self.quad_weights)
 
 
-def solve():
+def solve() -> TNN:
     print(f"求解 {SPATIAL_DIM}维 空间 + 1维 时间 热传导方程 (两阶段法)...")
-    print(f"总维度: {SPATIAL_DIM + 1}")
 
-    # ===== 第一阶段：拟合初始条件 =====
-    print("\n阶段1: 拟合初始条件 u(x, 0) = prod(sin(π*x_i))...")
+    # >>>>>> 第一阶段: 拟合初始条件 <<<<<<
+    print("阶段1: 拟合初始条件 u(x, 0) = prod(sin(π*x_i))...")
 
-    # 构造 u_tnn，满足空间边界条件和 t=0 处无约束
+    # 构造 u_tnn, 满足空间边界条件和 t=0 处无约束
     boundary_u = [(0.0, 1.0)] * SPATIAL_DIM + [(None, None)]
     u_func = (
         SeparableDimNetworkGELU(dim=SPATIAL_DIM + 1, rank=RANK)
         .apply_dirichlet_bd(boundary_u)
         .to(DEVICE, DTYPE)
     )
-    u_tnn = TNN(dim=SPATIAL_DIM + 1, rank=RANK, func=u_func).to(DEVICE, DTYPE)
+    u_tnn: TNN = TNN(dim=SPATIAL_DIM + 1, rank=RANK, func=u_func).to(
+        DEVICE, DTYPE
+    )
 
     # 训练 u 拟合初始条件
-    ic_loss = InitialConditionLoss(u_tnn)
+    loss_fn = InitialConditionLoss(u_tnn)
     u_tnn.fit(
-        loss_fn=ic_loss,
+        loss_fn,
         phases=[
-            {"type": "adam", "lr": 0.001, "epochs": 15000},
+            {"type": "adam", "lr": 0.001, "epochs": 10000},
         ],
     )
 
-    # ===== 第二阶段：求解PDE =====
-    print("\n阶段2: 求解PDE，训练修正项 v...")
-
-    # 固定 u_tnn
+    # >>>>>> 第二阶段: 求解PDE <<<<<<
+    print("阶段2: 求解PDE, 训练修正项 v...")
+    # 固定 u_tnn 的参数不进行学习
     for p in u_tnn.parameters():
         p.requires_grad = False
 
-    # 构造 v_tnn，满足空间边界条件和 t=0 处为0
+    # 构造 v_tnn, 满足空间边界条件和 t=0 处为0
     boundary_v = [(0.0, 1.0)] * SPATIAL_DIM + [(0.0, None)]
     v_func = (
         SeparableDimNetworkGELU(dim=SPATIAL_DIM + 1, rank=RANK)
         .apply_dirichlet_bd(boundary_v)
         .to(DEVICE, DTYPE)
     )
-    v_tnn = TNN(dim=SPATIAL_DIM + 1, rank=RANK, func=v_func).to(DEVICE, DTYPE)
+    v_tnn: TNN = TNN(dim=SPATIAL_DIM + 1, rank=RANK, func=v_func).to(
+        DEVICE, DTYPE
+    )
 
     # 训练 v 使得 u+v 满足PDE
     pde_loss = HeatPDELoss(v_tnn, u_tnn)
     v_tnn.fit(
-        loss_fn=pde_loss,
+        pde_loss,
         phases=[
             {"type": "adam", "lr": 0.01, "epochs": 1000},
         ],
@@ -161,34 +159,24 @@ def solve():
     return u_tnn + v_tnn
 
 
-def evaluate(solution_fn):
+def evaluate(solution_tnn: TNN):
     print("\n评估误差...")
     n_test = 2000
-    total_dim = SPATIAL_DIM + 1
 
     # 随机采样测试点
     # 空间 [0, 1], 时间 [0, TIME_END]
-    test_points = torch.rand((n_test, total_dim), device=DEVICE, dtype=DTYPE)
+    test_points = torch.rand(
+        (n_test, SPATIAL_DIM + 1), device=DEVICE, dtype=DTYPE
+    )
     test_points[:, -1] = test_points[:, -1] * TIME_END
 
     # 计算真解
-    # u_true = exp(-nu * d * pi^2 * t) * prod(sin(pi * x_i))
-
-    spatial_x = test_points[:, :SPATIAL_DIM]
-    t = test_points[:, SPATIAL_DIM]
-
-    # prod(sin(pi * x_i))
-    spatial_term = torch.prod(torch.sin(PI * spatial_x), dim=1)
-
-    # exp term
-    decay = -NU * SPATIAL_DIM * (PI**2)
-    time_term = torch.exp(decay * t)
-
-    u_true = spatial_term * time_term
+    u_true = torch.prod(
+        torch.sin(PI * test_points[:, :SPATIAL_DIM]), dim=1
+    ) * torch.exp(-NU * SPATIAL_DIM * (PI**2) * test_points[:, SPATIAL_DIM])
 
     with torch.no_grad():
-        u_pred = solution_fn(test_points)
-
+        u_pred = solution_tnn(test_points)
         diff = u_pred - u_true
         l2_err = torch.norm(diff) / torch.norm(u_true)
 
@@ -196,5 +184,5 @@ def evaluate(solution_fn):
 
 
 if __name__ == "__main__":
-    solution_tnn = solve()
+    solution_tnn: TNN = solve()
     evaluate(solution_tnn)

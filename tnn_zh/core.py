@@ -150,10 +150,14 @@ class TNN(nn.Module):
 
         参数:
             grad_dim: 计算梯度的维度索引, 范围为[0, self.dim-1]
+                      支持负数索引, 如 -1 表示最后一个维度
 
         返回:
             TNN: 新的TNN实例, 表示∂u/∂x_{grad_dim}
         """
+        if grad_dim < 0:
+            grad_dim += self.dim
+
         if not (0 <= grad_dim < self.dim):
             raise ValueError(
                 f"grad_dim {grad_dim} 超出有效范围 [0, {self.dim - 1}]"
@@ -204,12 +208,17 @@ class TNN(nn.Module):
         计算TNN的二阶偏导数 ∂²u/∂x_{dim1}∂x_{dim2}
 
         参数:
-            dim1: 第一个维度索引, 范围为[0, self.dim-1]
-            dim2: 第二个维度索引, 范围为[0, self.dim-1]
+            dim1: 第一个维度索引, 范围为[0, self.dim-1]. 支持负数索引.
+            dim2: 第二个维度索引, 范围为[0, self.dim-1]. 支持负数索引.
 
         返回:
             TNN: 新的TNN实例, 表示∂²u/∂x_{dim1}∂x_{dim2}
         """
+        if dim1 < 0:
+            dim1 += self.dim
+        if dim2 < 0:
+            dim2 += self.dim
+
         if not (0 <= dim1 < self.dim):
             raise ValueError(f"dim1 {dim1} 超出有效范围 [0, {self.dim - 1}]")
         if not (0 <= dim2 < self.dim):
@@ -561,6 +570,7 @@ class TNN(nn.Module):
         参数:
             fixed_dims: 字典,键为维度索引,值为固定的取值
                 例如: {0: 1.5, 2: 3.0} 表示在第0维固定为1.5,第2维固定为3.0
+                支持负数索引,如 {-1: 0.5} 表示最后一个维度固定为0.5
 
         返回:
             TNN: 降维后的新TNN实例
@@ -568,19 +578,27 @@ class TNN(nn.Module):
         if not fixed_dims:
             raise ValueError("fixed_dims不能为空")
 
-        for dim_idx in fixed_dims:
+        # 处理负数索引并规范化
+        normalized_fixed_dims = {}
+        for dim_idx, val in fixed_dims.items():
+            orig_dim_idx = dim_idx
+            if dim_idx < 0:
+                dim_idx += self.dim
+
             if not (0 <= dim_idx < self.dim):
-                raise ValueError(
-                    f"维度索引{dim_idx}超出有效范围[0, {self.dim - 1}]"
-                )
+                raise ValueError(f"维度索引{orig_dim_idx}超出有效范围")
+
+            if dim_idx in normalized_fixed_dims:
+                raise ValueError(f"维度索引{dim_idx}被重复指定")
+
+            normalized_fixed_dims[dim_idx] = val
+
+        fixed_dims = normalized_fixed_dims
 
         if len(fixed_dims) >= self.dim:
             raise ValueError(
                 f"固定维度数{len(fixed_dims)}必须小于TNN总维度{self.dim}"
             )
-
-        if len(set(fixed_dims.keys())) != len(fixed_dims):
-            raise ValueError("fixed_dims中存在重复的维度索引")
 
         # 计算固定维度的函数值
         fixed_point = torch.zeros(

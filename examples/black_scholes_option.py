@@ -65,22 +65,21 @@ class BCLoss(nn.Module):
         # 注意: 输入是(S, sigma), 目标函数只与S有关
         self.g = wrap_1d_func_as_tnn(dim=2, target_dim=0)(
             lambda S: torch.relu(S - K)
-        ).to(DEVICE)
+        ).to(DEVICE, DTYPE)
 
     def forward(self):
         # 提取t=T切片 (第1维固定为T)
-        u_T = self.u_tnn.slice(fixed_dims={1: T})
-
-        diff = u_T - self.g
-        return int_tnn_L2(diff, self.pts1, self.w1) + 10.0 * int_tnn_L2(
-            diff, self.pts2, self.w2
+        u_T: TNN = self.u_tnn.slice(fixed_dims={1: T})
+        residual: TNN = u_T - self.g
+        return int_tnn_L2(residual, self.pts1, self.w1) + 10.0 * int_tnn_L2(
+            residual, self.pts2, self.w2
         )
 
 
 class PDELoss(nn.Module):
     """PDE残差损失"""
 
-    def __init__(self, v_tnn, u_tnn):
+    def __init__(self, v_tnn: TNN, u_tnn: TNN):
         super().__init__()
         self.v_tnn = v_tnn  # 待求部分
         self.u_tnn = u_tnn  # 已知边界部分 (参数固定)
@@ -91,25 +90,63 @@ class PDELoss(nn.Module):
             dtype=DTYPE,
         )
 
-        # 系数函数
-        # dim=3: (S, t, sigma)
-        self.sigma2 = wrap_1d_func_as_tnn(3, 2)(lambda s: 0.5 * s**2).to(
-            DEVICE
-        )
-        self.S2 = wrap_1d_func_as_tnn(3, 0)(lambda S: S**2).to(DEVICE)
-        self.rS = wrap_1d_func_as_tnn(3, 0)(lambda S: r * S).to(DEVICE)
+        # 定义系数tnn, dim=3: (S, t, sigma)
+        self.sigma2: TNN = wrap_1d_func_as_tnn(dim=3, target_dim=2)(
+            lambda s: 0.5 * s**2
+        ).to(DEVICE, DTYPE)
+        self.S2: TNN = wrap_1d_func_as_tnn(dim=3, target_dim=0)(
+            lambda S: S**2
+        ).to(DEVICE, DTYPE)
+        self.rS: TNN = wrap_1d_func_as_tnn(dim=3, target_dim=0)(
+            lambda S: r * S
+        ).to(DEVICE, DTYPE)
 
     def forward(self):
-        C = self.u_tnn + self.v_tnn
-
-        # L(C) = C_t + 0.5*sigma^2*S^2*C_SS + r*S*C_S - r*C
-        res = (
+        C: TNN = self.u_tnn + self.v_tnn
+        residual: TNN = (
             C.grad(1)
             + self.sigma2 * self.S2 * C.grad2(0, 0)
             + self.rS * C.grad(0)
             - r * C
         )
-        return int_tnn_L2(res, self.pts, self.w)
+        return int_tnn_L2(residual, self.pts, self.w)
+
+
+def solve() -> TNN:
+    print("求解Black-Scholes方程 (两阶段法)...")
+    rank = 20
+
+    # >>>>>> 第一阶段: 学习边界函数 u (满足终值条件) <<<<<<
+    print("阶段1: 拟合终值条件...")
+    # 强制 S=0 时 u=0
+    u_func = (
+        SeparableDimNetworkGELU(3, rank)
+        .apply_dirichlet_bd([(0.0, None), (None, None), (None, None)])
+        .to(DEVICE, DTYPE)
+    )
+    u_tnn: TNN = TNN(3, rank, u_func).to(DEVICE, DTYPE)
+
+    loss_fn = BCLoss(u_tnn)
+    u_tnn.fit(loss_fn, phases=[{"type": "adam", "lr": 0.01, "epochs": 1000}])
+
+    # >>>>>> 第二阶段: 学习修正项 v (使得 u+v 满足PDE) <<<<<<
+    print("阶段2: 求解PDE...")
+    # 固定 u_tnn 的参数不进行学习
+    for p in u_tnn.parameters():
+        p.requires_grad = False
+
+    # v 在 S=0 和 t=T 处为0
+    v_func = (
+        SeparableDimNetworkGELU(3, rank)
+        .apply_dirichlet_bd([(0.0, None), (None, T), (None, None)])
+        .to(DEVICE, DTYPE)
+    )
+    v_tnn: TNN = TNN(3, rank, v_func).to(DEVICE, DTYPE)
+
+    loss_fn = PDELoss(v_tnn, u_tnn)
+    v_tnn.fit(loss_fn, phases=[{"type": "adam", "lr": 0.005, "epochs": 2000}])
+
+    return u_tnn + v_tnn
 
 
 def bs_exact(S, t, sigma, K, r, T):
@@ -132,49 +169,8 @@ def bs_exact(S, t, sigma, K, r, T):
     return torch.where(tau < 1e-7, torch.relu(S - K), C)
 
 
-def solve():
-    print("求解Black-Scholes方程 (两阶段法)...")
-    rank = 20
-
-    # 1. 学习边界函数 u (满足终值条件)
-    print("Phase 1: 拟合终值条件...")
-    # 强制 S=0 时 u=0
-    u_func = (
-        SeparableDimNetworkGELU(3, rank)
-        .apply_dirichlet_bd([(0.0, None), (None, None), (None, None)])
-        .to(DEVICE, DTYPE)
-    )
-    u_tnn = TNN(3, rank, u_func).to(DEVICE, DTYPE)
-
-    loss_fn = BCLoss(u_tnn)
-    u_tnn.fit(loss_fn, phases=[{"type": "adam", "lr": 0.01, "epochs": 1000}])
-
-    # 2. 学习修正项 v (使得 u+v 满足PDE)
-    print("Phase 2: 求解PDE...")
-    # 固定 u
-    for p in u_tnn.parameters():
-        p.requires_grad = False
-
-    # v 在 S=0 和 t=T 处为0
-    v_func = (
-        SeparableDimNetworkGELU(3, rank)
-        .apply_dirichlet_bd([(0.0, None), (None, T), (None, None)])
-        .to(DEVICE, DTYPE)
-    )
-    v_tnn = TNN(3, rank, v_func).to(DEVICE, DTYPE)
-
-    loss_fn = PDELoss(v_tnn, u_tnn)
-    v_tnn.fit(loss_fn, phases=[{"type": "adam", "lr": 0.005, "epochs": 4000}])
-
-    # 返回完整解
-    def solution(x):
-        return u_tnn(x) + v_tnn(x)
-
-    return solution
-
-
-def evaluate(model):
-    print("\n评估准确度...")
+def evaluate(solution_tnn: TNN):
+    print("\n评估误差...")
     n_test = 5000
 
     # 随机采样测试点
@@ -184,7 +180,7 @@ def evaluate(model):
     pts[:, 2] = pts[:, 2] * (sigma_max - sigma_min) + sigma_min  # sigma
 
     with torch.no_grad():
-        pred = model(pts)
+        pred = solution_tnn(pts)
         exact = bs_exact(pts[:, 0], pts[:, 1], pts[:, 2], K, r, T)
 
         # 避免数值问题，只在 t < T-epsilon 处评估 PDE 内部
@@ -195,5 +191,5 @@ def evaluate(model):
 
 
 if __name__ == "__main__":
-    model = solve()
-    evaluate(model)
+    solution_tnn: TNN = solve()
+    evaluate(solution_tnn)

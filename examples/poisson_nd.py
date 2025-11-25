@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 from tnn_zh import (
     TNN,
-    SeparableDimNetworkGELU,
+    SeparableDimNetwork,
     generate_quad_points,
     int_tnn_L2,
 )
@@ -57,35 +57,33 @@ class PoissonPDELoss(nn.Module):
         source_func = SourceFunc(DIM)
         self.f_tnn: TNN = (DIM * PI**2) * TNN(
             dim=DIM, rank=1, func=source_func
-        ).to(DEVICE, dtype=DTYPE)
+        ).to(DEVICE, DTYPE)
 
     def forward(self):
         residual: TNN = -self.tnn.laplace() - self.f_tnn
         return int_tnn_L2(residual, self.quad_points, self.quad_weights)
 
 
-def solve():
+def solve() -> TNN:
     print(f"求解{DIM}维Poisson方程...")
 
     # 创建满足强制边界条件的func网络
     boundary_conditions = [(0.0, 1.0) for _ in range(DIM)]
     u_tnn_func = (
-        SeparableDimNetworkGELU(dim=DIM, rank=RANK)
+        SeparableDimNetwork(dim=DIM, rank=RANK)
         .apply_dirichlet_bd(boundary_conditions)
-        .to(DEVICE, dtype=DTYPE)
+        .to(DEVICE, DTYPE)
     )
 
     # 构建tnn模型
-    u_tnn: TNN = TNN(dim=DIM, rank=RANK, func=u_tnn_func).to(
-        DEVICE, dtype=DTYPE
-    )
+    u_tnn: TNN = TNN(dim=DIM, rank=RANK, func=u_tnn_func).to(DEVICE, DTYPE)
 
     # 实例化loss
     loss_fn = PoissonPDELoss(u_tnn)
 
     # 训练
     u_tnn.fit(
-        loss_fn=loss_fn,
+        loss_fn,
         phases=[{"type": "adam", "lr": 0.01, "epochs": 2000}],
     )
 
@@ -100,7 +98,7 @@ def evaluate(u_tnn: TNN):
 
     # 构造真解TNN
     u_true_tnn: TNN = TNN(dim=DIM, rank=1, func=SourceFunc(DIM)).to(
-        DEVICE, dtype=DTYPE
+        DEVICE, DTYPE
     )
 
     with torch.no_grad():
