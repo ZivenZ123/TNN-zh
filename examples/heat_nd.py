@@ -1,11 +1,11 @@
 """
-使用TNN求解N维热传导方程 (Heat Equation)
+使用TNN求解N维热传导方程
 方程: u_t = nu * Δu
 域: [0, 1]^d x [0, 0.5]
 边界条件: u=0 在空间边界
 初始条件: u(x, 0) = prod(sin(pi * x_i))
 
-采用两阶段训练法(Two-Phase Training):
+采用两阶段训练法:
 阶段1: 训练TNN u拟合初始条件 u(x, 0) = prod(sin(pi * x_i))
 阶段2: 固定u, 训练修正项v, 使得 u+v 满足PDE
 最终解: solution(x) = u(x) + v(x)
@@ -57,7 +57,7 @@ class InitialConditionLoss(nn.Module):
 
         # 在 t=0 处的积分点
         domain_bounds = [(0.0, 1.0)] * SPATIAL_DIM
-        self.quad_points, self.quad_weights = generate_quad_points(
+        self.pts, self.w = generate_quad_points(
             domain_bounds,
             device=DEVICE,
             dtype=DTYPE,
@@ -65,15 +65,15 @@ class InitialConditionLoss(nn.Module):
 
         # 目标函数: prod(sin(π*x_i))
         target_func = SourceFunc(SPATIAL_DIM)
-        self.target: TNN = TNN(dim=SPATIAL_DIM, rank=1, func=target_func).to(
-            DEVICE, DTYPE
-        )
+        self.target: TNN = TNN(
+            dim=SPATIAL_DIM, rank=1, func=target_func, theta=False
+        ).to(DEVICE, DTYPE)
 
     def forward(self):
         # 提取 t=0 切片
         u_0: TNN = self.u_tnn.slice(fixed_dims={-1: 0.0})
         residual: TNN = u_0 - self.target
-        return int_tnn_L2(residual, self.quad_points, self.quad_weights)
+        return int_tnn_L2(residual, self.pts, self.w)
 
 
 class HeatPDELoss(nn.Module):
@@ -86,14 +86,13 @@ class HeatPDELoss(nn.Module):
 
         # 生成积分点: 空间+时间
         domain_bounds = [(0.0, 1.0)] * SPATIAL_DIM + [(0.0, TIME_END)]
-        self.quad_points, self.quad_weights = generate_quad_points(
+        self.pts, self.w = generate_quad_points(
             domain_bounds,
             device=DEVICE,
             dtype=DTYPE,
         )
 
     def forward(self):
-        # 组合解 u = u_tnn + v_tnn
         u: TNN = self.u_tnn + self.v_tnn
 
         # 计算时间导数和空间拉普拉斯
@@ -101,7 +100,7 @@ class HeatPDELoss(nn.Module):
         laplace_spatial: TNN = u.laplace() - u.grad2(dim1=-1, dim2=-1)
 
         residual: TNN = u_t - NU * laplace_spatial
-        return int_tnn_L2(residual, self.quad_points, self.quad_weights)
+        return int_tnn_L2(residual, self.pts, self.w)
 
 
 def solve() -> TNN:
@@ -126,7 +125,7 @@ def solve() -> TNN:
     u_tnn.fit(
         loss_fn,
         phases=[
-            {"type": "adam", "lr": 0.001, "epochs": 10000},
+            {"type": "adam", "lr": 0.005, "epochs": 10000},
         ],
     )
 

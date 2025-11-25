@@ -75,7 +75,7 @@ class TNN(nn.Module):
         dim: int,
         rank: int,
         func: nn.Module,
-        theta_module: ThetaModule | None = None,
+        theta: ThetaModule | bool = True,
     ):
         """
         TNN - 张量神经网络
@@ -88,7 +88,9 @@ class TNN(nn.Module):
             rank: 张量分解的秩
             func: nn.Module, 输入 (n_1d, 1, dim) → 输出 (n_1d, rank, dim)
                   计算所有 rank*dim 个子函数的输出值
-            theta_module: 系数模块
+            theta: 权重系数配置
+                   - bool: True 表示创建可学习权重(默认); False 表示权重固定为1.
+                   - ThetaModule: 直接使用传入的自定义权重模块.
         """
         super().__init__()
 
@@ -96,10 +98,10 @@ class TNN(nn.Module):
         self.rank = rank
         self.func = func
 
-        if theta_module is None:
-            self.theta_module = ThetaModule(self.rank)
+        if isinstance(theta, ThetaModule):
+            self.theta_module = theta
         else:
-            self.theta_module = theta_module
+            self.theta_module = ThetaModule(self.rank, learnable=theta)
 
     @property
     def theta(self):
@@ -200,7 +202,7 @@ class TNN(nn.Module):
             dim=self.dim,
             rank=self.rank,
             func=grad_func,
-            theta_module=self.theta_module,
+            theta=self.theta_module,
         )
 
     def grad2(self, dim1: int, dim2: int) -> "TNN":
@@ -262,7 +264,7 @@ class TNN(nn.Module):
             dim=self.dim,
             rank=self.rank,
             func=grad2_func,
-            theta_module=self.theta_module,
+            theta=self.theta_module,
         )
 
     def laplace(self) -> "TNN":
@@ -334,7 +336,7 @@ class TNN(nn.Module):
             dim=self.dim,
             rank=self.rank * self.dim,
             func=laplace_func,
-            theta_module=laplace_theta,
+            theta=laplace_theta,
         )
 
     def cat(self, other: "TNN") -> "TNN":
@@ -443,7 +445,7 @@ class TNN(nn.Module):
             dim=self.dim,
             rank=self.rank + other.rank,
             func=concat_func,
-            theta_module=new_theta_module,
+            theta=new_theta_module,
         )
 
     def _multiply_by_scalar(self, scalar) -> "TNN":
@@ -470,7 +472,7 @@ class TNN(nn.Module):
             dim=self.dim,
             rank=self.rank,
             func=self.func,
-            theta_module=scaled_theta_module,
+            theta=scaled_theta_module,
         )
 
     def _multiply_by_tnn(self, other: "TNN") -> "TNN":
@@ -547,7 +549,7 @@ class TNN(nn.Module):
             dim=self.dim,
             rank=self.rank * other.rank,
             func=product_func,
-            theta_module=product_theta_module,
+            theta=product_theta_module,
         )
 
     def __mul__(self, other) -> "TNN":
@@ -764,7 +766,7 @@ class TNN(nn.Module):
             dim=len(remaining_dims),
             rank=self.rank,
             func=sliced_func,
-            theta_module=new_theta_module,
+            theta=new_theta_module,
         )
 
     def __add__(self, other: "TNN | int | float | torch.Tensor") -> "TNN":
@@ -803,7 +805,7 @@ class TNN(nn.Module):
                 dim=self.dim,
                 rank=1,
                 func=ConstantFunc(),
-                theta_module=theta_module,
+                theta=theta_module,
             )
 
         if self.dim != other.dim:
@@ -846,7 +848,7 @@ class TNN(nn.Module):
             dim=self.dim,
             rank=1,
             func=ConstantFunc(),
-            theta_module=theta_module,
+            theta=theta_module,
         )
 
         return scalar_tnn.__add__(self)
@@ -1651,7 +1653,7 @@ def wrap_1d_func_as_tnn(dim: int, target_dim: int):
             dim=dim,
             rank=1,
             func=wrapped_func,
-            theta_module=ThetaModule(rank=1, learnable=False),
+            theta=False,
         )
 
         return tnn

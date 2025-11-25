@@ -1,5 +1,5 @@
 """
-Black-Scholes期权定价模型求解器 (简化版)
+Black-Scholes期权定价模型求解器
 
 基于张量神经网络(TNN)求解Black-Scholes偏微分方程.
 

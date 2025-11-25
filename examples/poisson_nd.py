@@ -47,7 +47,7 @@ class PoissonPDELoss(nn.Module):
 
         # 生成积分点
         domain_bounds = [(0.0, 1.0) for _ in range(DIM)]
-        self.quad_points, self.quad_weights = generate_quad_points(
+        self.pts, self.w = generate_quad_points(
             domain_bounds,
             device=DEVICE,
             dtype=DTYPE,
@@ -56,12 +56,12 @@ class PoissonPDELoss(nn.Module):
         # 将f(x)构造为tnn
         source_func = SourceFunc(DIM)
         self.f_tnn: TNN = (DIM * PI**2) * TNN(
-            dim=DIM, rank=1, func=source_func
+            dim=DIM, rank=1, func=source_func, theta=False
         ).to(DEVICE, DTYPE)
 
     def forward(self):
         residual: TNN = -self.tnn.laplace() - self.f_tnn
-        return int_tnn_L2(residual, self.quad_points, self.quad_weights)
+        return int_tnn_L2(residual, self.pts, self.w)
 
 
 def solve() -> TNN:
