@@ -86,7 +86,7 @@ class TNN(nn.Module):
         参数:
             dim: 输入维度
             rank: 张量分解的秩
-            func: nn.Module, 输入 (n_1d, 1, dim) → 输出 (n_1d, rank, dim)
+            func: nn.Module, 输入 (n_1d, dim) → 输出 (n_1d, rank, dim)
                   计算所有 rank*dim 个子函数的输出值
             theta: 权重系数配置
                    - bool: True 表示创建可学习权重(默认); False 表示权重固定为1.
@@ -362,7 +362,7 @@ class TNN(nn.Module):
 
             def forward(self, x):
                 """
-                x: (n_1d, 1, dim)
+                x: (n_1d, dim)
                 返回: (n_1d, rank1+rank2, dim)
                 """
                 output1 = self.func1(x)  # (n_1d, rank1, dim)
@@ -493,7 +493,7 @@ class TNN(nn.Module):
 
             def forward(self, x):
                 """
-                x: (n_1d, 1, dim)
+                x: (n_1d, dim)
                 返回: (n_1d, rank1*rank2, dim)
                 """
                 output1 = self.func1(x)  # (n_1d, rank1, dim)

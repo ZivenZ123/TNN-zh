@@ -54,10 +54,6 @@ uv run examples/poisson_nd.py
 
 ### 1. 快速开始: TNN 求解 PDE 的标准流程
 
-TNN 使用**张量分解**将高维 PDE 求解转化为优化问题, 通过将解函数表示为一维子网络的张量积来避免维数灾难。
-
-#### 🔧 标准求解流程
-
 ```
 ┌─────────────────────────────────────────────────────────────────
 │  步骤 1: 定义 PDE 损失函数类 (继承 nn.Module)
@@ -74,7 +70,7 @@ TNN 使用**张量分解**将高维 PDE 求解转化为优化问题, 通过将�
 ┌─────────────────────────────────────────────────────────────────
 │  步骤 2: 定义 solve() 求解主函数
 ├─────────────────────────────────────────────────────────────────
-│  ① 创建 func 网络 (SeparableDimNetworkGELU)
+│  ① 创建 func 网络 (SeparableDimNetwork)
 │    └─ apply_dirichlet_bd() 应用强制边界条件
 │
 │  ② 构建解的 TNN 模型
@@ -91,19 +87,19 @@ TNN 使用**张量分解**将高维 PDE 求解转化为优化问题, 通过将�
 │  ① 生成测试点
 │  ② 计算预测值 u_tnn(test_points)
 │  ③ 与解析解对比 (如有)
-│  ④ 可视化结果 (绘制等高线图/切片图)
+│  ④ 可视化结果
 └─────────────────────────────────────────────────────────────────
 ```
 
 ### 2. 实战：求解 5 维 Poisson 方程
 
-求解方程 $-\Delta u = f$ 在 $[0,1]^5$ 上, 真解为 $u(x) = \prod_i \sin(\pi x_i)$。
+求解方程 $-\Delta u = f$ 在 $\Omega = [0,1]^5$ 上, 边界条件 $u|_{\partial\Omega} = 0$, 真解为 $u(x) = \prod_i \sin(\pi x_i)$。
 
 ```python
+import math
 import torch
 import torch.nn as nn
-import math
-from tnn_zh import TNN, SeparableDimNetworkGELU, generate_quad_points, int_tnn_L2
+from tnn_zh import TNN, SeparableDimNetwork, generate_quad_points, int_tnn_L2
 
 # 配置
 DIM = 5
@@ -122,8 +118,8 @@ class SourceFunc(nn.Module):
     def forward(self, x):
         if x.dim() == 1:
             x = x.unsqueeze(0)
-        val = torch.sin(PI * x)  # 每个维度计算 sin(πx)
-        return val.unsqueeze(1)  # 添加 rank 维度
+        val = torch.sin(PI * x)
+        return val.unsqueeze(1)
 
 # 2. 定义 PDE 损失函数
 class PoissonPDELoss(nn.Module):
@@ -133,35 +129,38 @@ class PoissonPDELoss(nn.Module):
         
         # 生成积分点
         domain_bounds = [(0.0, 1.0) for _ in range(DIM)]
-        self.quad_points, self.quad_weights = generate_quad_points(
+        self.pts, self.w = generate_quad_points(
             domain_bounds, device=DEVICE, dtype=DTYPE
         )
         
         # 构造源项 TNN
         source_func = SourceFunc(DIM)
         self.f_tnn: TNN = (DIM * PI**2) * TNN(
-            dim=DIM, rank=1, func=source_func
-        ).to(DEVICE, dtype=DTYPE)
+            dim=DIM, rank=1, func=source_func, theta=False
+        ).to(DEVICE, DTYPE)
     
     def forward(self):
         residual: TNN = -self.tnn.laplace() - self.f_tnn
-        return int_tnn_L2(residual, self.quad_points, self.quad_weights)
+        return int_tnn_L2(residual, self.pts, self.w)
 
 # 3. 构建模型 (应用 Dirichlet 零边界条件)
 boundary_conditions = [(0.0, 1.0) for _ in range(DIM)]
 u_tnn_func = (
-    SeparableDimNetworkGELU(dim=DIM, rank=RANK)
+    SeparableDimNetwork(dim=DIM, rank=RANK)
     .apply_dirichlet_bd(boundary_conditions)
-    .to(DEVICE, dtype=DTYPE)
+    .to(DEVICE, DTYPE)
 )
-u_tnn = TNN(dim=DIM, rank=RANK, func=u_tnn_func).to(DEVICE, dtype=DTYPE)
+u_tnn = TNN(dim=DIM, rank=RANK, func=u_tnn_func).to(DEVICE, DTYPE)
 
 # 4. 训练
 loss_fn = PoissonPDELoss(u_tnn)
 u_tnn.fit(
-    loss_fn=loss_fn,
-    phases=[{"type": "adam", "lr": 0.01, "epochs": 2000}]
+    loss_fn,
+    phases=[
+        {"type": "adam", "lr": 0.01, "epochs": 2000},
+        {"type": "lbfgs", "lr": 1.0, "epochs": 100},
+    ],
 )
 ```
 
-> 完整代码请参考 `examples/poisson_nd.py`。
+> 完整代码请参考 `examples/poisson_nd.py`

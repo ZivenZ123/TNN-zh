@@ -9,6 +9,7 @@ import math
 
 import torch
 import torch.nn as nn
+
 from tnn_zh import (
     TNN,
     SeparableDimNetwork,
@@ -84,7 +85,10 @@ def solve() -> TNN:
     # 训练
     u_tnn.fit(
         loss_fn,
-        phases=[{"type": "adam", "lr": 0.01, "epochs": 2000}],
+        phases=[
+            {"type": "adam", "lr": 0.01, "epochs": 2000},
+            {"type": "lbfgs", "lr": 1.0, "epochs": 100},
+        ],
     )
 
     return u_tnn
