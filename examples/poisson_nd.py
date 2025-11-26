@@ -86,10 +86,25 @@ def solve() -> TNN:
     u_tnn.fit(
         loss_fn,
         phases=[
-            {"type": "adam", "lr": 0.01, "epochs": 20000},
+            {
+                "type": "adam",
+                "lr": 0.0005,
+                "epochs": 20000,
+                "save": "poisson_adam",
+            },
             {"type": "lbfgs", "lr": 1.0, "epochs": 100},
         ],
     )
+
+    # # 加载adam训练结果并开始lbfgs训练
+    # u_tnn = TNN.load("poisson_adam", device=DEVICE, dtype=DTYPE)
+    # loss_fn = PoissonPDELoss(u_tnn)
+    # u_tnn.fit(
+    #     loss_fn,
+    #     phases=[
+    #         {"type": "lbfgs", "lr": 1.0, "epochs": 100},
+    #     ],
+    # )
 
     return u_tnn
 
