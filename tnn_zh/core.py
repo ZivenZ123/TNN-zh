@@ -27,14 +27,19 @@ u(x₁, x₂, ..., x_dim) = Σ_{r=1}^{rank} θᵣ * Π_{d=1}^{dim} subtnn_d^{(r)
 """
 
 import math
+import os
 import warnings
 from collections.abc import Callable
+from pathlib import Path
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
 import torch.optim as optim
 from tqdm import tqdm
+
+# 检查点保存目录
+CHECKPOINT_DIR = "checkpoints"
 
 
 class ThetaModule(nn.Module):
@@ -887,6 +892,176 @@ class TNN(nn.Module):
 
         return self * (1.0 / scalar_value)
 
+    def save(self, name: str) -> str:
+        """
+        保存TNN模型到 checkpoints/{name}.pt
+
+        参数:
+            name: 用户指定的文件名 (不需要后缀和目录)
+
+        返回:
+            实际保存的完整路径
+        """
+        # 确保目录存在
+        save_dir = Path(CHECKPOINT_DIR)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        # 自动添加后缀
+        if not name.endswith(".pt"):
+            name = f"{name}.pt"
+
+        save_path = save_dir / name
+
+        # 提取func网络的信息
+        func_info = self._extract_func_info()
+
+        # 构建保存内容
+        checkpoint = {
+            "state_dict": self.state_dict(),
+            "dim": self.dim,
+            "rank": self.rank,
+            "func_info": func_info,
+        }
+
+        torch.save(checkpoint, save_path)
+        print(f"模型已保存到: {save_path}")
+
+        return str(save_path)
+
+    def _extract_func_info(self) -> dict:
+        """
+        提取func网络的配置信息, 用于重建网络
+
+        返回:
+            包含网络类型、配置和边界条件的字典
+        """
+        func = self.func
+        boundary = None
+
+        # 检查是否有边界条件包装
+        if hasattr(func, "original_func") and hasattr(func, "boundary"):
+            boundary = func.boundary
+            func = func.original_func
+
+        # 提取网络类型和配置
+        func_type = type(func).__name__
+        func_config = {}
+
+        if (
+            func_type == "SeparableDimNetwork"
+            or func_type == "SeparableDimNetworkGELU"
+        ):
+            func_config = {
+                "dim": func.dim,
+                "rank": func.rank,
+                "hidden_layers": func.hidden_layers,
+            }
+        else:
+            raise ValueError(
+                f"不支持保存类型为 {func_type} 的func网络, "
+                "目前仅支持 SeparableDimNetwork 和 SeparableDimNetworkGELU"
+            )
+
+        return {
+            "func_type": func_type,
+            "func_config": func_config,
+            "boundary": boundary,
+        }
+
+    @classmethod
+    def load(
+        cls, name: str, device: torch.device, dtype: torch.dtype
+    ) -> "TNN":
+        """
+        从 checkpoints/{name}.pt 加载TNN模型
+
+        参数:
+            name: 文件名 (可省略后缀和目录)
+            device: 目标设备 (必填)
+            dtype: 目标数据类型 (必填)
+
+        返回:
+            完整重建的TNN实例 (包括边界条件)
+        """
+        # 处理路径
+        if not name.endswith(".pt"):
+            name = f"{name}.pt"
+
+        # 检查是否是完整路径
+        if os.path.exists(name):
+            load_path = name
+        else:
+            load_path = Path(CHECKPOINT_DIR) / name
+
+        if not os.path.exists(load_path):
+            raise FileNotFoundError(f"找不到模型文件: {load_path}")
+
+        # 加载检查点
+        checkpoint = torch.load(
+            load_path, map_location=device, weights_only=False
+        )
+
+        # 提取信息
+        dim = checkpoint["dim"]
+        rank = checkpoint["rank"]
+        func_info = checkpoint["func_info"]
+
+        # 重建func网络
+        func = cls._rebuild_func(func_info, device, dtype)
+
+        # 创建TNN实例
+        tnn = cls(dim=dim, rank=rank, func=func)
+        tnn.load_state_dict(checkpoint["state_dict"])
+        tnn = tnn.to(device, dtype)
+
+        print(f"模型已从 {load_path} 加载")
+
+        return tnn
+
+    @classmethod
+    def _rebuild_func(
+        cls, func_info: dict, device: torch.device, dtype: torch.dtype
+    ) -> nn.Module:
+        """
+        根据保存的信息重建func网络
+
+        参数:
+            func_info: 包含网络类型、配置和边界条件的字典
+            device: 目标设备
+            dtype: 目标数据类型
+
+        返回:
+            重建的func网络 (包括边界条件, 如果有)
+        """
+        func_type = func_info["func_type"]
+        func_config = func_info["func_config"]
+        boundary = func_info.get("boundary")
+
+        # 根据类型创建网络
+        if func_type == "SeparableDimNetwork":
+            func = SeparableDimNetwork(
+                dim=func_config["dim"],
+                rank=func_config["rank"],
+                hidden_layers=func_config["hidden_layers"],
+            )
+        elif func_type == "SeparableDimNetworkGELU":
+            func = SeparableDimNetworkGELU(
+                dim=func_config["dim"],
+                rank=func_config["rank"],
+                hidden_layers=func_config["hidden_layers"],
+            )
+        else:
+            raise ValueError(f"不支持的func网络类型: {func_type}")
+
+        # 应用边界条件
+        if boundary is not None:
+            func = apply_dirichlet_bd(boundary)(func)
+
+        # 移动到目标设备和数据类型
+        func = func.to(device, dtype)
+
+        return func
+
     def fit(
         self, loss_fn: Callable[[], torch.Tensor | tuple], phases: list[dict]
     ) -> list[float]:
@@ -899,6 +1074,7 @@ class TNN(nn.Module):
                 - 'type': 'adam' 或 'lbfgs'
                 - 'lr': 学习率 (作为Warmup Cosine调度器的峰值学习率)
                 - 'epochs': 训练轮数
+                - 'save': (可选) 保存模型的文件名, 该阶段结束后自动保存
                 - 其他参数 (如 grad_clip, weight_decay 等)
 
         返回:
@@ -1031,6 +1207,11 @@ class TNN(nn.Module):
                 raise ValueError(
                     f"不支持的优化器类型: {phase_type}, 仅支持 'adam' 和 'lbfgs'"
                 )
+
+            # 检查是否需要保存模型
+            save_name = phase_config.get("save")
+            if save_name is not None:
+                self.save(save_name)
 
         return losses
 

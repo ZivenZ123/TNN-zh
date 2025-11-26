@@ -164,3 +164,42 @@ u_tnn.fit(
 ```
 
 > 完整代码请参考 `examples/poisson_nd.py`
+
+### 3. 模型保存与加载
+
+TNN 支持便捷的模型保存和加载功能, 所有模型自动保存到 `checkpoints/` 目录.
+
+#### 训练时自动保存
+
+在 `fit()` 的 phases 配置中添加 `save` 参数, 该阶段结束后自动保存:
+
+```python
+u_tnn.fit(
+    loss_fn,
+    phases=[
+        {"type": "adam", "lr": 0.01, "epochs": 2000, "save": "poisson_adam"},
+        {"type": "lbfgs", "lr": 1.0, "epochs": 100, "save": "poisson_final"},
+    ],
+)
+# 训练完成后, 模型保存到:
+# - checkpoints/poisson_adam.pt (Adam 阶段结束)
+# - checkpoints/poisson_final.pt (LBFGS 阶段结束)
+```
+
+#### 手动保存
+
+```python
+u_tnn.save("my_model")  # 保存到 checkpoints/my_model.pt
+```
+
+#### 加载模型
+
+```python
+# 加载已保存的模型 (自动重建网络结构和边界条件)
+u_tnn = TNN.load("poisson_final", device=DEVICE, dtype=DTYPE)
+
+# 直接使用
+u_pred = u_tnn(test_points)
+```
+
+> 注意: `load()` 方法的 `device` 和 `dtype` 参数是必填的, 需要明确指定目标设备和数据类型.

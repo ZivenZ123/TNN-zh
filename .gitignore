@@ -64,3 +64,6 @@ htmlcov/
 # Windows
 Thumbs.db
 
+# TNN 模型检查点
+checkpoints/
+
