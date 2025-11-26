@@ -1004,7 +1004,7 @@ class TNN(nn.Module):
                 )
 
                 with tqdm(range(epochs), desc=phase_desc) as pbar:
-                    for step in pbar:
+                    for _ in pbar:
 
                         def closure(optimizer=optimizer):
                             optimizer.zero_grad()
@@ -1019,14 +1019,13 @@ class TNN(nn.Module):
 
                         loss = optimizer.step(closure)
 
-                        if step % 10 == 0 or step == epochs - 1:
-                            loss_val = (
-                                loss.item()
-                                if isinstance(loss, torch.Tensor)
-                                else loss
-                            )
-                            losses.append(loss_val)
-                            pbar.set_postfix(loss=f"{loss_val:.2e}")
+                        loss_val = (
+                            loss.item()
+                            if isinstance(loss, torch.Tensor)
+                            else loss
+                        )
+                        losses.append(loss_val)
+                        pbar.set_postfix(loss=f"{loss_val:.2e}")
 
             else:
                 raise ValueError(

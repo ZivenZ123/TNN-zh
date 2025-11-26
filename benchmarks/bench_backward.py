@@ -1,4 +1,4 @@
-"""测试 func.forward / int_tnn_L2 / backward 速度对比"""
+"""测试 func.forward / l2_norm / backward 速度对比"""
 
 import time
 
@@ -8,7 +8,7 @@ from tnn_zh import (
     TNN,
     SeparableDimNetwork,
     generate_quad_points,
-    int_tnn_L2,
+    l2_norm,
 )
 
 DIM = 10
@@ -40,7 +40,7 @@ if __name__ == "__main__":
     # warmup
     for _ in range(10):
         _ = func(pts)
-        loss = int_tnn_L2(tnn, pts, w)
+        loss = l2_norm(tnn, pts, w)
         loss.backward()
     sync()
 
@@ -51,24 +51,24 @@ if __name__ == "__main__":
     sync()
     t_forward = (time.perf_counter() - start) / N_RUNS * 1000
 
-    # 2. int_tnn_L2
+    # 2. l2_norm
     start = time.perf_counter()
     for _ in range(N_RUNS):
-        _ = int_tnn_L2(tnn, pts, w)
+        _ = l2_norm(tnn, pts, w)
     sync()
     t_int_l2 = (time.perf_counter() - start) / N_RUNS * 1000
 
-    # 3. int_tnn_L2 + backward
+    # 3. l2_norm + backward
     start = time.perf_counter()
     for _ in range(N_RUNS):
-        loss = int_tnn_L2(tnn, pts, w)
+        loss = l2_norm(tnn, pts, w)
         loss.backward()
     sync()
     t_backward = (time.perf_counter() - start) / N_RUNS * 1000
 
     print(f"[单个tnn] func.forward:         {t_forward:.3f} ms")
-    print(f"[单个tnn] int_tnn_L2:           {t_int_l2:.3f} ms")
-    print(f"[单个tnn] int_tnn_L2+backward:  {t_backward:.3f} ms")
+    print(f"[单个tnn] l2_norm:           {t_int_l2:.3f} ms")
+    print(f"[单个tnn] l2_norm+backward:  {t_backward:.3f} ms")
 
     print("-" * 40)
 
@@ -79,7 +79,7 @@ if __name__ == "__main__":
 
     # warmup
     for _ in range(10):
-        loss = int_tnn_L2(tnn_add, pts, w)
+        loss = l2_norm(tnn_add, pts, w)
         loss.backward()
     sync()
 
@@ -91,20 +91,20 @@ if __name__ == "__main__":
 
     start = time.perf_counter()
     for _ in range(N_RUNS):
-        _ = int_tnn_L2(tnn_add, pts, w)
+        _ = l2_norm(tnn_add, pts, w)
     sync()
     t_int_l2_add = (time.perf_counter() - start) / N_RUNS * 1000
 
     start = time.perf_counter()
     for _ in range(N_RUNS):
-        loss = int_tnn_L2(tnn_add, pts, w)
+        loss = l2_norm(tnn_add, pts, w)
         loss.backward()
     sync()
     t_backward_add = (time.perf_counter() - start) / N_RUNS * 1000
 
     print(f"[tnn+tnn] func.forward:         {t_forward_add:.3f} ms")
-    print(f"[tnn+tnn] int_tnn_L2:           {t_int_l2_add:.3f} ms")
-    print(f"[tnn+tnn] int_tnn_L2+backward:  {t_backward_add:.3f} ms")
+    print(f"[tnn+tnn] l2_norm:           {t_int_l2_add:.3f} ms")
+    print(f"[tnn+tnn] l2_norm+backward:  {t_backward_add:.3f} ms")
 
     print("-" * 40)
 
@@ -115,7 +115,7 @@ if __name__ == "__main__":
 
     # warmup
     for _ in range(10):
-        loss = int_tnn_L2(tnn_add3, pts, w)
+        loss = l2_norm(tnn_add3, pts, w)
         loss.backward()
     sync()
 
@@ -127,17 +127,17 @@ if __name__ == "__main__":
 
     start = time.perf_counter()
     for _ in range(N_RUNS):
-        _ = int_tnn_L2(tnn_add3, pts, w)
+        _ = l2_norm(tnn_add3, pts, w)
     sync()
     t_int_l2_add3 = (time.perf_counter() - start) / N_RUNS * 1000
 
     start = time.perf_counter()
     for _ in range(N_RUNS):
-        loss = int_tnn_L2(tnn_add3, pts, w)
+        loss = l2_norm(tnn_add3, pts, w)
         loss.backward()
     sync()
     t_backward_add3 = (time.perf_counter() - start) / N_RUNS * 1000
 
     print(f"[tnn+tnn+tnn] func.forward:         {t_forward_add3:.3f} ms")
-    print(f"[tnn+tnn+tnn] int_tnn_L2:           {t_int_l2_add3:.3f} ms")
-    print(f"[tnn+tnn+tnn] int_tnn_L2+backward:  {t_backward_add3:.3f} ms")
+    print(f"[tnn+tnn+tnn] l2_norm:           {t_int_l2_add3:.3f} ms")
+    print(f"[tnn+tnn+tnn] l2_norm+backward:  {t_backward_add3:.3f} ms")

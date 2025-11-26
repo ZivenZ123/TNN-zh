@@ -64,7 +64,7 @@ uv run examples/poisson_nd.py
 │
 │  forward(self):
 │    ├─ 计算 PDE 残差 TNN (例: -Δu - f)
-│    └─ 返回 L2 积分 (int_tnn_L2)
+│    └─ 返回 L2 范数 (l2_norm)
 └─────────────────────────────────────────────────────────────────
                             ↓
 ┌─────────────────────────────────────────────────────────────────
@@ -99,7 +99,7 @@ uv run examples/poisson_nd.py
 import math
 import torch
 import torch.nn as nn
-from tnn_zh import TNN, SeparableDimNetwork, generate_quad_points, int_tnn_L2
+from tnn_zh import TNN, SeparableDimNetwork, generate_quad_points, l2_norm
 
 # 配置
 DIM = 5
@@ -141,7 +141,7 @@ class PoissonPDELoss(nn.Module):
     
     def forward(self):
         residual: TNN = -self.tnn.laplace() - self.f_tnn
-        return int_tnn_L2(residual, self.pts, self.w)
+        return l2_norm(residual, self.pts, self.w)
 
 # 3. 构建模型 (应用 Dirichlet 零边界条件)
 boundary_conditions = [(0.0, 1.0) for _ in range(DIM)]

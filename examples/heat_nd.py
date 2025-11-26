@@ -20,7 +20,7 @@ from tnn_zh import (
     TNN,
     SeparableDimNetworkGELU,
     generate_quad_points,
-    int_tnn_L2,
+    l2_norm,
 )
 
 # 配置
@@ -74,7 +74,7 @@ class InitialConditionLoss(nn.Module):
         # 提取 t=0 切片
         u_0: TNN = self.u_tnn.slice(fixed_dims={-1: 0.0})
         residual: TNN = u_0 - self.target
-        return int_tnn_L2(residual, self.pts, self.w)
+        return l2_norm(residual, self.pts, self.w)
 
 
 class HeatPDELoss(nn.Module):
@@ -101,7 +101,7 @@ class HeatPDELoss(nn.Module):
         laplace_spatial: TNN = u.laplace() - u.grad2(dim1=-1, dim2=-1)
 
         residual: TNN = u_t - NU * laplace_spatial
-        return int_tnn_L2(residual, self.pts, self.w)
+        return l2_norm(residual, self.pts, self.w)
 
 
 def solve() -> TNN:
@@ -153,6 +153,7 @@ def solve() -> TNN:
         pde_loss,
         phases=[
             {"type": "adam", "lr": 0.01, "epochs": 1000},
+            {"type": "lbfgs", "lr": 1.0, "epochs": 50},
         ],
     )
 
@@ -161,7 +162,7 @@ def solve() -> TNN:
 
 def evaluate(solution_tnn: TNN):
     print("\n评估误差...")
-    n_test = 2000
+    n_test = 1_000_000
 
     # 随机采样测试点
     # 空间 [0, 1], 时间 [0, TIME_END]

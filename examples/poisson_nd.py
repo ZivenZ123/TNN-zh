@@ -14,7 +14,7 @@ from tnn_zh import (
     TNN,
     SeparableDimNetwork,
     generate_quad_points,
-    int_tnn_L2,
+    l2_norm,
 )
 
 # 配置
@@ -62,7 +62,7 @@ class PoissonPDELoss(nn.Module):
 
     def forward(self):
         residual: TNN = -self.tnn.laplace() - self.f_tnn
-        return int_tnn_L2(residual, self.pts, self.w)
+        return l2_norm(residual, self.pts, self.w)
 
 
 def solve() -> TNN:
@@ -86,7 +86,7 @@ def solve() -> TNN:
     u_tnn.fit(
         loss_fn,
         phases=[
-            {"type": "adam", "lr": 0.01, "epochs": 2000},
+            {"type": "adam", "lr": 0.01, "epochs": 20000},
             {"type": "lbfgs", "lr": 1.0, "epochs": 100},
         ],
     )
@@ -96,7 +96,7 @@ def solve() -> TNN:
 
 def evaluate(u_tnn: TNN):
     print("\n评估误差...")
-    n_test = 1000
+    n_test = 1_000_000
     # [0,1]^d中的随机点
     test_points = torch.rand((n_test, DIM), device=DEVICE, dtype=DTYPE)
 

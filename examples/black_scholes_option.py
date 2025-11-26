@@ -15,7 +15,7 @@ from tnn_zh import (
     TNN,
     SeparableDimNetworkGELU,
     generate_quad_points,
-    int_tnn_L2,
+    l2_norm,
     wrap_1d_func_as_tnn,
 )
 
@@ -72,7 +72,7 @@ class BCLoss(nn.Module):
         # 提取t=T切片 (第1维固定为T)
         u_T: TNN = self.u_tnn.slice(fixed_dims={1: T})
         residual: TNN = u_T - self.g
-        return int_tnn_L2(residual, self.pts1, self.w1) + 10.0 * int_tnn_L2(
+        return l2_norm(residual, self.pts1, self.w1) + 10.0 * l2_norm(
             residual, self.pts2, self.w2
         )
 
@@ -110,7 +110,7 @@ class PDELoss(nn.Module):
             + self.rS * C.grad(0)
             - r * C
         )
-        return int_tnn_L2(residual, self.pts, self.w)
+        return l2_norm(residual, self.pts, self.w)
 
 
 def solve() -> TNN:
@@ -128,7 +128,7 @@ def solve() -> TNN:
     u_tnn: TNN = TNN(3, rank, u_func).to(DEVICE, DTYPE)
 
     loss_fn = BCLoss(u_tnn)
-    u_tnn.fit(loss_fn, phases=[{"type": "adam", "lr": 0.01, "epochs": 1000}])
+    u_tnn.fit(loss_fn, phases=[{"type": "adam", "lr": 0.01, "epochs": 10000}])
 
     # >>>>>> 第二阶段: 学习修正项 v (使得 u+v 满足PDE) <<<<<<
     print("阶段2: 求解PDE...")
@@ -145,7 +145,13 @@ def solve() -> TNN:
     v_tnn: TNN = TNN(3, rank, v_func).to(DEVICE, DTYPE)
 
     loss_fn = PDELoss(v_tnn, u_tnn)
-    v_tnn.fit(loss_fn, phases=[{"type": "adam", "lr": 0.005, "epochs": 2000}])
+    v_tnn.fit(
+        loss_fn,
+        phases=[
+            {"type": "adam", "lr": 0.005, "epochs": 2000},
+            {"type": "lbfgs", "lr": 1.0, "epochs": 50},
+        ],
+    )
 
     return u_tnn + v_tnn
 
@@ -172,7 +178,7 @@ def bs_exact(S, t, sigma, K, r, T):
 
 def evaluate(solution_tnn: TNN):
     print("\n评估误差...")
-    n_test = 5000
+    n_test = 1_000_000
 
     # 随机采样测试点
     pts = torch.rand(n_test, 3, device=DEVICE, dtype=DTYPE)

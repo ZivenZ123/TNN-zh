@@ -8,7 +8,7 @@ TNN积分模块
 - generate_quad_points: 生成积分点和权重(张量积形式)
 - int_tnn: 计算单个TNN的积分
 - int_tnn_product: 计算两个TNN乘积的积分(内存优化)
-- int_tnn_L2: 计算TNN的L2范数平方
+- l2_norm: 计算TNN的L2范数
 
 张量积网格优势:
 - 内存: O(n_1d × dim) 而非 O(n_1d^dim × dim)
@@ -30,7 +30,7 @@ quad_points, quad_weights = generate_quad_points(
 # 步骤2: 在积分点上进行积分计算
 result1 = int_tnn(tnn, quad_points, quad_weights)
 result2 = int_tnn_product(tnn1, tnn2, quad_points, quad_weights)
-result3 = int_tnn_L2(tnn, quad_points, quad_weights)
+result3 = l2_norm(tnn, quad_points, quad_weights)
 """
 
 import numpy as np
@@ -275,22 +275,22 @@ def int_tnn_product(
     return result
 
 
-def int_tnn_L2(
+def l2_norm(
     tnn: TNN,
     quad_points: torch.Tensor,
     quad_weights: torch.Tensor,
 ) -> torch.Tensor:
     """
-    计算TNN的L2范数平方(张量积网格)
+    计算TNN的L2范数(张量积网格)
 
-    计算 ∫ (tnn)² dx = ∫ (tnn * tnn) dx
+    计算 ||tnn||_L2 = sqrt(∫ (tnn)² dx)
 
     Args:
-        tnn: 待计算L2范数平方的TNN实例
+        tnn: 待计算L2范数的TNN实例
         quad_points: 积分点张量,形状(n_1d, dim) - 张量积表示
         quad_weights: 积分权重张量,形状(n_1d,) - 所有维度共用
 
     Returns:
-        TNN的L2范数平方
+        TNN的L2范数
     """
-    return int_tnn_product(tnn, tnn, quad_points, quad_weights)
+    return int_tnn_product(tnn, tnn, quad_points, quad_weights).sqrt()

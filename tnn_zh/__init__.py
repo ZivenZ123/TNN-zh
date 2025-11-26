@@ -14,8 +14,8 @@ from .integration import (
     GaussLegendre,
     generate_quad_points,
     int_tnn,
-    int_tnn_L2,
     int_tnn_product,
+    l2_norm,
 )
 
 __version__ = "0.1.0"
@@ -30,7 +30,7 @@ __all__ = [
     "wrap_1d_func_as_tnn",
     "int_tnn",
     "int_tnn_product",
-    "int_tnn_L2",
+    "l2_norm",
     "generate_quad_points",
     "GaussLegendre",
 ]
