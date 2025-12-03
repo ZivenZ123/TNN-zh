@@ -947,9 +947,10 @@ class TNN(nn.Module):
         func_type = type(func).__name__
         func_config = {}
 
-        if (
-            func_type == "SeparableDimNetwork"
-            or func_type == "SeparableDimNetworkGELU"
+        if func_type in (
+            "SeparableDimNetwork",
+            "SeparableDimNetworkGELU",
+            "SeparableDimNetworkSin",
         ):
             func_config = {
                 "dim": func.dim,
@@ -959,7 +960,7 @@ class TNN(nn.Module):
         else:
             raise ValueError(
                 f"不支持保存类型为 {func_type} 的func网络, "
-                "目前仅支持 SeparableDimNetwork 和 SeparableDimNetworkGELU"
+                "目前仅支持 SeparableDimNetwork, SeparableDimNetworkGELU 和 SeparableDimNetworkSin"
             )
 
         return {
@@ -1046,6 +1047,12 @@ class TNN(nn.Module):
             )
         elif func_type == "SeparableDimNetworkGELU":
             func = SeparableDimNetworkGELU(
+                dim=func_config["dim"],
+                rank=func_config["rank"],
+                hidden_layers=func_config["hidden_layers"],
+            )
+        elif func_type == "SeparableDimNetworkSin":
+            func = SeparableDimNetworkSin(
                 dim=func_config["dim"],
                 rank=func_config["rank"],
                 hidden_layers=func_config["hidden_layers"],
@@ -1757,6 +1764,267 @@ class SeparableDimNetworkGELU(nn.Module):
             # 链式法则
             grad2_x = gelu_grad2 * (grad_x * grad_x) + gelu_grad * grad2_x
             grad_x = gelu_grad * grad_x
+
+            # 传播到下一层
+            if i < self.num_layers - 1:
+                grad_x = torch.bmm(self.weights[i + 1], grad_x)
+                grad2_x = torch.bmm(self.weights[i + 1], grad2_x)
+
+        # (dim, rank, n_1d) → (n_1d, rank, dim)
+        output = x.permute(2, 1, 0)
+        grad_output = grad_x.permute(2, 1, 0)
+        grad2_output = grad2_x.permute(2, 1, 0)
+
+        return output, grad_output, grad2_output
+
+    def apply_dirichlet_bd(self, boundary):
+        return apply_dirichlet_bd(boundary)(self)
+
+
+class SeparableDimNetworkSin(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        rank: int,
+        hidden_layers: tuple[int, ...] = (50, 50, 50),
+    ):
+        """
+        维度可分离神经网络 (Sin激活函数), 用于构造TNN
+
+        参数:
+            dim: 输入维度
+            rank: 输出秩(对应TNN中的张量秩)
+            hidden_layers: 隐藏层大小tuple, 默认为(50, 50, 50)
+
+        输入: (n_1d, dim)
+        输出: (n_1d, rank, dim)
+
+        网络结构: [1 -> hidden_layers[0] -> ... -> hidden_layers[-1] -> rank]
+        激活函数: Sin
+
+        关键特性:
+        - 使用批量矩阵乘法, 避免Python循环
+        - 保证维度间独立性: y[b,r,j] 只依赖于 x[b,j]
+        - 对于每个 (b,r), 雅可比矩阵 ∂y[b,r,:]/∂x[b,:] 是 dim×dim 对角矩阵
+        """
+        super().__init__()
+
+        self.dim = dim
+        self.rank = rank
+        self.hidden_layers = hidden_layers
+
+        # 构建网络结构: [1] + hidden_layers + [rank]
+        self.layer_sizes = [1] + list(hidden_layers) + [rank]
+        self.num_layers = len(self.layer_sizes) - 1
+
+        # 动态创建权重和偏置参数
+        self.weights = nn.ParameterList()
+        self.biases = nn.ParameterList()
+
+        for i in range(self.num_layers):
+            in_size = self.layer_sizes[i]
+            out_size = self.layer_sizes[i + 1]
+            # W: (dim, out_size, in_size)
+            self.weights.append(
+                nn.Parameter(torch.empty(dim, out_size, in_size))
+            )
+            # b: (dim, out_size, 1)
+            self.biases.append(nn.Parameter(torch.empty(dim, out_size, 1)))
+
+        # 初始化参数
+        self._initialize_parameters()
+
+    def _initialize_parameters(self):
+        """使用Xavier初始化权重"""
+        for W in self.weights:
+            nn.init.xavier_uniform_(W, gain=1.0)
+        for b in self.biases:
+            nn.init.zeros_(b)
+
+    def forward(self, x):
+        """
+        参数:
+            x: shape为(n_1d, dim)
+
+        返回:
+            shape为(n_1d, rank, dim)
+        """
+        # (n_1d, dim) → (dim, n_1d) → (dim, 1, n_1d)
+        x = x.t().unsqueeze(1)
+
+        # 逐层前向传播
+        for i in range(self.num_layers):
+            x = torch.bmm(self.weights[i], x) + self.biases[i]
+            x = torch.sin(x)
+
+        # (dim, rank, n_1d) → (n_1d, rank, dim)
+        return x.permute(2, 1, 0)
+
+    def forward_with_grad(self, x, grad_dim):
+        """
+        同时计算前向传播和对指定维度的梯度
+
+        参数:
+            x: shape为(n_1d, dim)
+            grad_dim: 计算梯度的维度索引
+
+        返回:
+            output: shape为(n_1d, rank, dim) - 原函数值
+            grad_output: shape为(n_1d, rank, dim) - 导数值,只有第grad_dim列是真导数
+        """
+        # (n_1d, dim) → (dim, n_1d) → (dim, 1, n_1d)
+        x = x.t().unsqueeze(1)
+
+        # 初始化第grad_dim维度的梯度
+        grad_x = self.weights[0][grad_dim]  # (out_size_0, 1)
+
+        # 逐层前向传播和梯度传播
+        for i in range(self.num_layers):
+            # 前向传播(保存激活前的值)
+            x_pre_act = torch.bmm(self.weights[i], x) + self.biases[i]
+            x = torch.sin(x_pre_act)
+
+            # 梯度传播(使用激活前的值计算sin导数)
+            # sin'(x) = cos(x)
+            sin_grad_val = torch.cos(x_pre_act[grad_dim])
+            grad_x = sin_grad_val * grad_x
+
+            # 传播到下一层(如果不是最后一层)
+            if i < self.num_layers - 1:
+                grad_x = self.weights[i + 1][grad_dim] @ grad_x
+
+        # (dim, rank, n_1d) → (n_1d, rank, dim)
+        output = x.permute(2, 1, 0)
+
+        # 构造梯度输出: 只有grad_dim列是真导数,其他列是原函数值
+        grad_output = output.clone()
+        # grad_x: (rank, n_1d) → (n_1d, rank)
+        grad_output[:, :, grad_dim] = grad_x.t()
+
+        return output, grad_output
+
+    def forward_with_grad2(self, x, grad_dim1, grad_dim2):
+        """
+        同时计算前向传播和对两个维度的二阶混合偏导数
+
+        参数:
+            x: shape为(n_1d, dim)
+            grad_dim1: 第一个梯度维度索引
+            grad_dim2: 第二个梯度维度索引
+
+        返回:
+            output: shape为(n_1d, rank, dim) - 原函数值
+            grad2_output: shape为(n_1d, rank, dim) - 二阶导数值
+        """
+        # (n_1d, dim) → (dim, n_1d) → (dim, 1, n_1d)
+        x = x.t().unsqueeze(1)
+
+        if grad_dim1 == grad_dim2:
+            # 同一维度的二阶导数: ∂²/∂x_i²
+            grad_x = self.weights[0][grad_dim1]  # (out_size_0, 1)
+            grad2_x = torch.zeros_like(grad_x)  # (out_size_0, 1)
+
+            # 逐层前向传播和梯度传播
+            for i in range(self.num_layers):
+                # 前向传播(保存激活前的值)
+                x_pre_act = torch.bmm(self.weights[i], x) + self.biases[i]
+                x = torch.sin(x_pre_act)
+
+                # 从激活前的值计算导数
+                x_pre_grad_dim = x_pre_act[grad_dim1]
+
+                # 计算sin的一阶和二阶导数
+                # sin'(x) = cos(x), sin''(x) = -sin(x)
+                sin_grad = torch.cos(x_pre_grad_dim)
+                sin_grad2 = -torch.sin(x_pre_grad_dim)
+
+                # 链式法则: grad2 = f''(x) * (grad_x)² + f'(x) * grad2_x
+                grad2_x = sin_grad2 * (grad_x * grad_x) + sin_grad * grad2_x
+                grad_x = sin_grad * grad_x
+
+                # 传播到下一层
+                if i < self.num_layers - 1:
+                    grad2_x = self.weights[i + 1][grad_dim1] @ grad2_x
+                    grad_x = self.weights[i + 1][grad_dim1] @ grad_x
+
+            # (dim, rank, n_1d) → (n_1d, rank, dim)
+            output = x.permute(2, 1, 0)
+
+            # 只clone一次
+            grad2_output = output.clone()
+            grad2_output[:, :, grad_dim1] = grad2_x.t()
+
+            return output, grad2_output
+
+        else:
+            # 混合二阶导数: ∂²/∂x_i∂x_j (i≠j)
+            # 需要计算两个维度的一阶导数
+
+            # 初始化两个维度的一阶梯度
+            grad_x1 = self.weights[0][grad_dim1]  # (out_size_0, 1)
+            grad_x2 = self.weights[0][grad_dim2]  # (out_size_0, 1)
+
+            # 逐层前向传播和梯度传播
+            for i in range(self.num_layers):
+                # 前向传播(保存激活前的值)
+                x_pre_act = torch.bmm(self.weights[i], x) + self.biases[i]
+                x = torch.sin(x_pre_act)
+
+                # 计算两个维度的一阶导数
+                sin_grad1 = torch.cos(x_pre_act[grad_dim1])
+                grad_x1 = sin_grad1 * grad_x1
+
+                sin_grad2 = torch.cos(x_pre_act[grad_dim2])
+                grad_x2 = sin_grad2 * grad_x2
+
+                # 传播到下一层
+                if i < self.num_layers - 1:
+                    grad_x1 = self.weights[i + 1][grad_dim1] @ grad_x1
+                    grad_x2 = self.weights[i + 1][grad_dim2] @ grad_x2
+
+            # (dim, rank, n_1d) → (n_1d, rank, dim)
+            output = x.permute(2, 1, 0)
+
+            # clone一次,然后设置两列为对应的一阶导数
+            grad2_output = output.clone()
+            grad2_output[:, :, grad_dim1] = grad_x1.t()
+            grad2_output[:, :, grad_dim2] = grad_x2.t()
+
+            return output, grad2_output
+
+    def forward_all_grad2(self, x):
+        """
+        同时计算所有维度的二阶导数 (主对角线)
+
+        参数:
+            x: shape为(n_1d, dim)
+
+        返回:
+            output: (n_1d, rank, dim)
+            grad_output: (n_1d, rank, dim) - 一阶导数
+            grad2_output: (n_1d, rank, dim) - 二阶导数
+        """
+        # (n_1d, dim) → (dim, n_1d) → (dim, 1, n_1d)
+        x = x.t().unsqueeze(1)
+
+        # 初始化所有维度的梯度
+        grad_x = self.weights[0].clone()
+        grad2_x = torch.zeros_like(grad_x)
+
+        # 逐层前向传播和梯度传播
+        for i in range(self.num_layers):
+            # 前向传播(保存激活前的值)
+            x_pre_act = torch.bmm(self.weights[i], x) + self.biases[i]
+            x = torch.sin(x_pre_act)
+
+            # 计算sin的一阶和二阶导数
+            # sin'(x) = cos(x), sin''(x) = -sin(x)
+            sin_grad = torch.cos(x_pre_act)
+            sin_grad2 = -torch.sin(x_pre_act)
+
+            # 链式法则
+            grad2_x = sin_grad2 * (grad_x * grad_x) + sin_grad * grad2_x
+            grad_x = sin_grad * grad_x
 
             # 传播到下一层
             if i < self.num_layers - 1:

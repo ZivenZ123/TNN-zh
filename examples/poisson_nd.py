@@ -12,7 +12,7 @@ import torch.nn as nn
 
 from tnn_zh import (
     TNN,
-    SeparableDimNetwork,
+    SeparableDimNetworkSin,
     generate_quad_points,
     l2_norm,
 )
@@ -71,7 +71,7 @@ def solve() -> TNN:
     # 创建满足强制边界条件的func网络
     boundary_conditions = [(0.0, 1.0) for _ in range(DIM)]
     u_tnn_func = (
-        SeparableDimNetwork(dim=DIM, rank=RANK)
+        SeparableDimNetworkSin(dim=DIM, rank=RANK)
         .apply_dirichlet_bd(boundary_conditions)
         .to(DEVICE, DTYPE)
     )
