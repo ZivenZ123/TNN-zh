@@ -13,6 +13,8 @@ from .core import (
 )
 from .integration import (
     GaussLegendre,
+    assemble_mass_matrix,
+    assemble_stiffness_matrix,
     generate_quad_points,
     int_tnn,
     int_tnn_product,
@@ -35,4 +37,6 @@ __all__ = [
     "l2_norm",
     "generate_quad_points",
     "GaussLegendre",
+    "assemble_mass_matrix",
+    "assemble_stiffness_matrix",
 ]

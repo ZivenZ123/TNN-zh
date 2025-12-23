@@ -9,6 +9,8 @@ TNN积分模块
 - int_tnn: 计算单个TNN的积分
 - int_tnn_product: 计算两个TNN乘积的积分(内存优化)
 - l2_norm: 计算TNN的L2范数
+- assemble_mass_matrix: 组装质量矩阵 M_{ij} = ∫ φᵢ φⱼ dx
+- assemble_stiffness_matrix: 组装刚度矩阵 S_{ij} = ∫ ∇φᵢ · ∇φⱼ dx
 
 张量积网格优势:
 - 内存: O(n_1d × dim) 而非 O(n_1d^dim × dim)
@@ -31,6 +33,11 @@ quad_points, quad_weights = generate_quad_points(
 result1 = int_tnn(tnn, quad_points, quad_weights)
 result2 = int_tnn_product(tnn1, tnn2, quad_points, quad_weights)
 result3 = l2_norm(tnn, quad_points, quad_weights)
+
+# 弱形式求解PDE - 组装矩阵
+# 将TNN的rank个秩1函数视为基函数, 用Galerkin方法求解
+M = assemble_mass_matrix(tnn, quad_points, quad_weights)  # (rank, rank)
+S = assemble_stiffness_matrix(tnn, quad_points, quad_weights)  # (rank, rank)
 """
 
 from __future__ import annotations
@@ -321,3 +328,96 @@ def l2_norm(
         TNN的L2范数
     """
     return int_tnn_product(tnn, tnn, quad_points, quad_weights).sqrt()
+
+
+def assemble_mass_matrix(
+    tnn: TNN,
+    quad_points: torch.Tensor,
+    quad_weights: torch.Tensor,
+) -> torch.Tensor:
+    """
+    组装质量矩阵 (Mass Matrix)
+
+    对于TNN的基函数 φᵣ(x) = Π_d f_d^{(r)}(x_d), 计算:
+    M_{ij} = ∫ φᵢ(x) φⱼ(x) dx = Π_d [∫ f_d^{(i)}(x_d) f_d^{(j)}(x_d) dx_d]
+
+    利用变量分离结构, 定义各维度的积分因子:
+    A_{ij}^{(d)} = ∫ f_d^{(i)}(x_d) f_d^{(j)}(x_d) dx_d
+
+    则质量矩阵为: M_{ij} = Π_d A_{ij}^{(d)}
+
+    Args:
+        tnn: TNN实例, 其 func 提供基函数
+        quad_points: 积分点张量, 形状(n_1d, dim)
+        quad_weights: 积分权重张量, 形状(n_1d, dim)
+
+    Returns:
+        质量矩阵, 形状(rank, rank)
+    """
+    # 获取函数值: (n_1d, rank, dim)
+    vals = tnn.func(quad_points)
+
+    # 计算各维度的积分因子 A_{ij}^{(d)}
+    # A[i,j,d] = Σ_n weights[n,d] * vals[n,i,d] * vals[n,j,d]
+    A = torch.einsum("nd,nid,njd->ijd", quad_weights, vals, vals)
+    # A: (rank, rank, dim)
+
+    # 质量矩阵: M_{ij} = Π_d A_{ij}^{(d)}
+    M = A.prod(dim=-1)  # (rank, rank)
+
+    return M
+
+
+def assemble_stiffness_matrix(
+    tnn: TNN,
+    quad_points: torch.Tensor,
+    quad_weights: torch.Tensor,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    """
+    组装刚度矩阵 (Stiffness Matrix)
+
+    对于TNN的基函数 φᵣ(x) = Π_d f_d^{(r)}(x_d), 计算:
+    S_{ij} = ∫ ∇φᵢ · ∇φⱼ dx = Σ_k ∫ (∂φᵢ/∂x_k)(∂φⱼ/∂x_k) dx
+
+    利用变量分离结构:
+    ∂φᵣ/∂x_k = (∂f_k^{(r)}/∂x_k) · Π_{d≠k} f_d^{(r)}(x_d)
+
+    定义:
+    A_{ij}^{(d)} = ∫ f_d^{(i)} f_d^{(j)} dx_d  (质量因子)
+    B_{ij}^{(d)} = ∫ (∂f_d^{(i)}/∂x_d)(∂f_d^{(j)}/∂x_d) dx_d  (刚度因子)
+
+    则刚度矩阵为:
+    S_{ij} = Σ_k B_{ij}^{(k)} · Π_{d≠k} A_{ij}^{(d)}
+           = Σ_k B_{ij}^{(k)} · M_{ij} / A_{ij}^{(k)}
+
+    其中 M_{ij} = Π_d A_{ij}^{(d)} 是质量矩阵.
+
+    Args:
+        tnn: TNN实例, 其 func 需要支持 forward_all_grad2 方法
+        quad_points: 积分点张量, 形状(n_1d, dim)
+        quad_weights: 积分权重张量, 形状(n_1d, dim)
+        eps: 防止除零的小量, 默认1e-12
+
+    Returns:
+        刚度矩阵, 形状(rank, rank)
+    """
+    # 获取函数值和一阶导数 (忽略二阶导数)
+    # vals, grads: (n_1d, rank, dim)
+    vals, grads, _ = tnn.func.forward_all_grad2(quad_points)
+
+    # 计算质量因子 A_{ij}^{(d)} 和刚度因子 B_{ij}^{(d)}
+    # A[i,j,d] = Σ_n weights[n,d] * vals[n,i,d] * vals[n,j,d]
+    # B[i,j,d] = Σ_n weights[n,d] * grads[n,i,d] * grads[n,j,d]
+    A = torch.einsum("nd,nid,njd->ijd", quad_weights, vals, vals)
+    B = torch.einsum("nd,nid,njd->ijd", quad_weights, grads, grads)
+    # A, B: (rank, rank, dim)
+
+    # 质量矩阵: M_{ij} = Π_d A_{ij}^{(d)}
+    M = A.prod(dim=-1)  # (rank, rank)
+
+    # 刚度矩阵: S_{ij} = Σ_k B_{ij}^{(k)} · M_{ij} / A_{ij}^{(k)}
+    # 使用 M / A 技巧避免循环, 加 eps 防止除零
+    S = (B * M.unsqueeze(-1) / (A + eps)).sum(dim=-1)  # (rank, rank)
+
+    return S
