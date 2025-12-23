@@ -38,6 +38,8 @@ import torch.nn.functional as F  # noqa: N812
 import torch.optim as optim
 from tqdm import tqdm
 
+from .integration import generate_quad_points
+
 # 检查点保存目录
 CHECKPOINT_DIR = "checkpoints"
 
@@ -771,6 +773,269 @@ class TNN(nn.Module):
             dim=len(remaining_dims),
             rank=self.rank,
             func=sliced_func,
+            theta=new_theta_module,
+        )
+
+    def marginalize(
+        self,
+        domain_bounds: list[tuple[float, float] | None],
+        n_quad_points: int = 16,
+        sub_intervals: int = 10,
+    ) -> "TNN":
+        """
+        对指定维度进行积分(边缘化), 返回降维后的新 TNN 实例
+
+        参数:
+            domain_bounds: 积分域边界列表, 长度必须等于 self.dim.
+                          - tuple[float, float]: 该维度要积分, 如 (0, 1)
+                          - None: 该维度不积分, 保留在结果中
+                          例如: [(0, 1), None, (0, 2)] 表示对第0和第2维积分, 保留第1维
+                          注意: 不能对所有维度积分 (至少保留一个 None)
+            n_quad_points: 高斯-勒让德求积节点数, 默认 16
+            sub_intervals: 子区间数量, 默认 10
+
+        返回:
+            TNN: 降维后的新 TNN 实例
+        """
+        # 验证输入
+        if len(domain_bounds) != self.dim:
+            raise ValueError(
+                f"domain_bounds的长度{len(domain_bounds)}必须等于TNN维度{self.dim}"
+            )
+
+        # 解析边缘化维度和剩余维度
+        marginalize_dims = []
+        remaining_dims = []
+        for d, bound in enumerate(domain_bounds):
+            if bound is not None:
+                marginalize_dims.append(d)
+            else:
+                remaining_dims.append(d)
+
+        if not marginalize_dims:
+            raise ValueError(
+                "至少需要对一个维度进行积分 (至少一个非None的bound)"
+            )
+
+        if not remaining_dims:
+            raise ValueError("不能对所有维度积分 (至少保留一个None)")
+
+        # 构造完整的 domain_bounds, None 替换为 (0, 0)
+        full_domain_bounds = [
+            bound if bound is not None else (0.0, 0.0)
+            for bound in domain_bounds
+        ]
+
+        # 生成积分点和权重 (向量化, 一次调用)
+        quad_points, quad_weights = generate_quad_points(
+            full_domain_bounds,
+            n_quad_points,
+            sub_intervals,
+            device=self.theta.device,
+            dtype=self.theta.dtype,
+        )
+        # quad_points: (n_1d, dim), quad_weights: (n_1d, dim)
+
+        # 获取函数输出: (n_1d, dim) → (n_1d, rank, dim)
+        func_output = self.func(quad_points)
+
+        # 提取边缘化维度的输出和权重
+        marginalize_dim_indices = torch.tensor(
+            marginalize_dims, device=self.theta.device
+        )
+        output_margin = func_output[
+            :, :, marginalize_dim_indices
+        ]  # (n_1d, rank, dim')
+        weights_margin = quad_weights[
+            :, marginalize_dim_indices
+        ]  # (n_1d, dim')
+
+        # 用 einsum 计算加权求和: (n_1d, dim') × (n_1d, rank, dim') → (rank, dim')
+        weighted = torch.einsum("nd,nrd->rd", weights_margin, output_margin)
+
+        # 在 dim' 维度求积得到积分因子: (rank, dim') → (rank,)
+        marginalize_factors = weighted.prod(dim=-1)
+
+        # 创建新的 theta 模块
+        class MarginalizedThetaModule(ThetaModule):
+            def __init__(
+                self, original_theta_module: ThetaModule, factor: torch.Tensor
+            ):
+                super().__init__(original_theta_module.rank, learnable=False)
+                del self.theta
+                self.original_theta_module = original_theta_module
+                self.register_buffer("factor", factor)
+
+            def forward(self) -> torch.Tensor:
+                return self.original_theta_module() * self.factor
+
+        new_theta_module = MarginalizedThetaModule(
+            self.theta_module, marginalize_factors
+        )
+
+        # 创建降维后的函数
+        remaining_dim_indices = torch.tensor(remaining_dims)
+
+        class MarginalizedFunc(nn.Module):
+            def __init__(
+                self,
+                original_func: nn.Module,
+                remaining_dim_indices: torch.Tensor,
+                remaining_dims_list: list[int],
+                original_dim: int,
+            ):
+                super().__init__()
+                self.original_func = original_func
+                self.register_buffer(
+                    "remaining_dim_indices", remaining_dim_indices
+                )
+                self.remaining_dims_list = remaining_dims_list
+                self.original_dim = original_dim
+
+                # 创建从 x 的列索引到 full_x 的列索引的映射
+                remaining_to_full = torch.tensor(
+                    remaining_dims_list, dtype=torch.long
+                )
+                self.register_buffer("remaining_to_full", remaining_to_full)
+
+            def _expand_input(self, x):
+                """将低维输入扩展为高维输入"""
+                n_1d = x.shape[0]
+                full_x = torch.zeros(
+                    n_1d,
+                    self.original_dim,
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                remaining_to_full_on_device = self.remaining_to_full.to(
+                    x.device
+                )
+                full_x[:, remaining_to_full_on_device] = x
+                return full_x
+
+            def _extract_remaining(self, full_output):
+                """从高维输出中提取剩余维度"""
+                remaining_dim_indices_on_device = (
+                    self.remaining_dim_indices.to(full_output.device)
+                )
+                return full_output[:, :, remaining_dim_indices_on_device]
+
+            def forward(self, x):
+                """
+                x: shape为(n_1d, new_dim)
+                返回: shape为(n_1d, rank, new_dim)
+                """
+                full_x = self._expand_input(x)
+                full_output = self.original_func(full_x)
+                return self._extract_remaining(full_output)
+
+            def forward_with_grad(self, x, grad_dim):
+                """
+                计算前向传播和一阶导数
+
+                参数:
+                    x: (n_1d, new_dim)
+                    grad_dim: 在新维度空间中的索引
+
+                返回:
+                    output: (n_1d, rank, new_dim)
+                    grad_output: (n_1d, rank, new_dim)
+                """
+                if not hasattr(self.original_func, "forward_with_grad"):
+                    raise NotImplementedError(
+                        f"{type(self.original_func).__name__}不支持forward_with_grad"
+                    )
+
+                full_x = self._expand_input(x)
+
+                # 将 grad_dim 从新维度空间映射到原始维度空间
+                original_grad_dim = self.remaining_dims_list[grad_dim]
+
+                full_output, full_grad_output = (
+                    self.original_func.forward_with_grad(
+                        full_x, original_grad_dim
+                    )
+                )
+
+                return (
+                    self._extract_remaining(full_output),
+                    self._extract_remaining(full_grad_output),
+                )
+
+            def forward_with_grad2(self, x, grad_dim1, grad_dim2):
+                """
+                计算前向传播和二阶导数
+
+                参数:
+                    x: (n_1d, new_dim)
+                    grad_dim1, grad_dim2: 在新维度空间中的索引
+
+                返回:
+                    output: (n_1d, rank, new_dim)
+                    grad2_output: (n_1d, rank, new_dim)
+                """
+                if not hasattr(self.original_func, "forward_with_grad2"):
+                    raise NotImplementedError(
+                        f"{type(self.original_func).__name__}不支持forward_with_grad2"
+                    )
+
+                full_x = self._expand_input(x)
+
+                # 将维度索引从新维度空间映射到原始维度空间
+                original_grad_dim1 = self.remaining_dims_list[grad_dim1]
+                original_grad_dim2 = self.remaining_dims_list[grad_dim2]
+
+                full_output, full_grad2_output = (
+                    self.original_func.forward_with_grad2(
+                        full_x, original_grad_dim1, original_grad_dim2
+                    )
+                )
+
+                return (
+                    self._extract_remaining(full_output),
+                    self._extract_remaining(full_grad2_output),
+                )
+
+            def forward_all_grad2(self, x):
+                """
+                计算所有维度的二阶导数
+
+                参数:
+                    x: (n_1d, new_dim)
+
+                返回:
+                    output: (n_1d, rank, new_dim)
+                    grad_output: (n_1d, rank, new_dim)
+                    grad2_output: (n_1d, rank, new_dim)
+                """
+                if not hasattr(self.original_func, "forward_all_grad2"):
+                    raise NotImplementedError(
+                        f"{type(self.original_func).__name__}不支持forward_all_grad2"
+                    )
+
+                full_x = self._expand_input(x)
+
+                full_output, full_grad, full_grad2 = (
+                    self.original_func.forward_all_grad2(full_x)
+                )
+
+                return (
+                    self._extract_remaining(full_output),
+                    self._extract_remaining(full_grad),
+                    self._extract_remaining(full_grad2),
+                )
+
+        marginalized_func = MarginalizedFunc(
+            self.func,
+            remaining_dim_indices,
+            remaining_dims,
+            self.dim,
+        )
+
+        return TNN(
+            dim=len(remaining_dims),
+            rank=self.rank,
+            func=marginalized_func,
             theta=new_theta_module,
         )
 

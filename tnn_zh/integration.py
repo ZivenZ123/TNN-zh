@@ -25,7 +25,7 @@ quad_points, quad_weights = generate_quad_points(
     device=device
 )
 # quad_points: (n_1d, dim) 形状的张量 - 张量积表示
-# quad_weights: (n_1d,) 形状的张量 - 所有维度共用
+# quad_weights: (n_1d, dim) 形状的张量 - 每个维度有独立的权重
 
 # 步骤2: 在积分点上进行积分计算
 result1 = int_tnn(tnn, quad_points, quad_weights)
@@ -33,10 +33,15 @@ result2 = int_tnn_product(tnn1, tnn2, quad_points, quad_weights)
 result3 = l2_norm(tnn, quad_points, quad_weights)
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import numpy as np
 import torch
 
-from .core import TNN
+if TYPE_CHECKING:
+    from .core import TNN
 
 DTYPE = torch.float32
 
@@ -144,7 +149,7 @@ def generate_quad_points(
     """
     为各维度生成高斯积分点和权重(张量积形式)
 
-    每个维度可以有不同的边界区间,但使用相同的采样点数量和权重结构.
+    每个维度可以有不同的边界区间, 积分点和权重都独立生成.
 
     Args:
         domain_bounds: 积分域边界,格式为[(a₁, b₁), (a₂, b₂), ...]
@@ -157,34 +162,56 @@ def generate_quad_points(
     Returns:
         (quad_points, quad_weights):
         - quad_points: 形状(n_1d, dim)的积分点张量,每列对应一个维度的采样点
-        - quad_weights: 形状(n_1d,)的积分权重张量,所有维度共用相同的权重结构
+        - quad_weights: 形状(n_1d, dim)的积分权重张量,每列对应一个维度的权重
 
     注意: 张量积网格实际代表 n_1d^dim 个点,但只需 O(n_1d*dim) 内存
     """
     gl = GaussLegendre()
     dim = len(domain_bounds)
 
-    # 为每个维度独立生成积分点
-    points_list = []
-    for d in range(dim):
-        a, b = domain_bounds[d]
-        points, weights = gl.gauss_points_with_subdivision(
-            n_quad_points, a, b, sub_intervals, dtype=dtype
-        )
-        if device is not None:
-            points = points.to(device)
-        points_list.append(points)
-
-    # 堆叠为 (n_1d, dim)
-    quad_points = torch.stack(points_list, dim=1)
-
-    # 权重在第一个维度生成(所有维度相同的权重结构)
-    # 注意: 权重与具体的[a,b]区间无关,只与区间长度有关
-    # 这里使用标准区间[0,1]生成权重结构
-    _, quad_weights = gl.gauss_points_with_subdivision(
-        n_quad_points, 0, 1, sub_intervals, dtype=dtype
+    # 1. 生成标准高斯点和权重 (只需一次)
+    standard_points, standard_weights = gl._standard_gauss_points(
+        n_quad_points, dtype=dtype
     )
+    # standard_points, standard_weights: (n_points,)
+
+    # 2. 把边界转成张量
+    bounds = torch.tensor(domain_bounds, dtype=dtype)  # (dim, 2)
+    a_vec = bounds[:, 0]  # (dim,)
+    b_vec = bounds[:, 1]  # (dim,)
+
+    # 3. 计算子区间 (向量化)
+    sub_interval_length = (b_vec - a_vec) / sub_intervals  # (dim,)
+    i_indices = torch.arange(sub_intervals, dtype=dtype)  # (sub_intervals,)
+
+    # sub_a: (sub_intervals, dim)
+    sub_a = a_vec.unsqueeze(0) + i_indices.unsqueeze(
+        1
+    ) * sub_interval_length.unsqueeze(0)
+    sub_b = sub_a + sub_interval_length.unsqueeze(0)
+
+    sub_scales = (sub_b - sub_a) * 0.5  # (sub_intervals, dim)
+    sub_offsets = (sub_a + sub_b) * 0.5  # (sub_intervals, dim)
+
+    # 4. 计算所有点和权重
+    # standard_points: (n_points,) -> (n_points, 1, 1)
+    # sub_scales: (sub_intervals, dim) -> (1, sub_intervals, dim)
+    all_points = standard_points.view(-1, 1, 1) * sub_scales.unsqueeze(
+        0
+    ) + sub_offsets.unsqueeze(0)  # (n_points, sub_intervals, dim)
+
+    all_weights = standard_weights.view(-1, 1, 1) * sub_scales.unsqueeze(0)
+    # (n_points, sub_intervals, dim)
+
+    # 5. reshape 为 (n_1d, dim), 其中 n_1d = n_points * sub_intervals
+    # 注意: 循环版本的顺序是先遍历子区间内的点, 再遍历子区间
+    # 所以需要 permute(1, 0, 2) 把 sub_intervals 放到前面
+    n_1d = n_quad_points * sub_intervals
+    quad_points = all_points.permute(1, 0, 2).reshape(n_1d, dim)
+    quad_weights = all_weights.permute(1, 0, 2).reshape(n_1d, dim)
+
     if device is not None:
+        quad_points = quad_points.to(device)
         quad_weights = quad_weights.to(device)
 
     return quad_points, quad_weights
@@ -200,12 +227,12 @@ def int_tnn(
 
     利用TNN结构和张量积网格进行高效积分计算:
     对于TNN: u(x) = Σ_{r=1}^{rank} θᵣ Π_{d=1}^{dim} func_d(x_d)[r]
-    积分: ∫ u(x) dx = Σ_{r=1}^{rank} θᵣ Π_{d=1}^{dim} (Σ_i ω[i] func_d(x_d^i)[r])
+    积分: ∫ u(x) dx = Σ_{r=1}^{rank} θᵣ Π_{d=1}^{dim} (Σ_i ω_d[i] func_d(x_d^i)[r])
 
     Args:
         tnn: 待积分的TNN实例
         quad_points: 积分点张量,形状(n_1d, dim) - 张量积表示
-        quad_weights: 积分权重张量,形状(n_1d,) - 所有维度共用
+        quad_weights: 积分权重张量,形状(n_1d, dim) - 每个维度有独立的权重
 
     Returns:
         TNN在指定域上的积分值
@@ -214,12 +241,12 @@ def int_tnn(
     output = tnn.func(quad_points)
 
     # 使用 einsum 一步完成加权求和和维度乘积
-    # 'n,nrd->rd': 对 n_1d 维度加权求和 → (rank, dim)
+    # 'nd,nrd->rd': 每个维度用自己的权重加权求和 → (rank, dim)
     # 然后对 dim 维度求积 → (rank,)
-    weighted = torch.einsum("n,nrd->rd", quad_weights, output)
+    weighted = torch.einsum("nd,nrd->rd", quad_weights, output)
     prod_result = weighted.prod(dim=-1)  # (rank,)
 
-    # 与theta加权求和 (einsum 更统一,但 dot 对一维向量点积更直观)
+    # 与theta加权求和
     result = torch.einsum("r,r->", tnn.theta, prod_result)
 
     return result
@@ -235,7 +262,7 @@ def int_tnn_product(
     计算两个TNN乘积的积分(张量积网格,内存优化)
 
     高效计算两个TNN乘积的积分:
-    ∫ (tnn1 * tnn2) dx = Σ_{r1,r2} (θ1_{r1}*θ2_{r2}) Π_d [Σ_i ω[i] f1_d^{r1}(x_d^i) f2_d^{r2}(x_d^i)]
+    ∫ (tnn1 * tnn2) dx = Σ_{r1,r2} (θ1_{r1}*θ2_{r2}) Π_d [Σ_i ω_d[i] f1_d^{r1}(x_d^i) f2_d^{r2}(x_d^i)]
 
     通过避免显式构造 (n_1d, rank1, rank2, dim) 的大中间变量来优化内存.
 
@@ -246,7 +273,7 @@ def int_tnn_product(
         tnn1: 第一个TNN实例
         tnn2: 第二个TNN实例
         quad_points: 积分点张量,形状(n_1d, dim) - 张量积表示
-        quad_weights: 积分权重张量,形状(n_1d,) - 所有维度共用
+        quad_weights: 积分权重张量,形状(n_1d, dim) - 每个维度有独立的权重
 
     Returns:
         两个TNN乘积的积分值
@@ -259,7 +286,7 @@ def int_tnn_product(
     output2 = tnn2.func(quad_points)  # (n_1d, rank2, dim)
 
     # 2. 用权重加权 output1 并转置为 (rank1, n_1d, dim)
-    weighted_output1 = torch.einsum("n,nrd->rnd", quad_weights, output1)
+    weighted_output1 = torch.einsum("nd,nrd->rnd", quad_weights, output1)
     # (rank1, n_1d, dim)
 
     # 3. 与 output2 做缩并 (einsum 避免大中间变量)
@@ -288,7 +315,7 @@ def l2_norm(
     Args:
         tnn: 待计算L2范数的TNN实例
         quad_points: 积分点张量,形状(n_1d, dim) - 张量积表示
-        quad_weights: 积分权重张量,形状(n_1d,) - 所有维度共用
+        quad_weights: 积分权重张量,形状(n_1d, dim) - 每个维度有独立的权重
 
     Returns:
         TNN的L2范数
