@@ -776,6 +776,278 @@ class TNN(nn.Module):
             theta=new_theta_module,
         )
 
+    def embed(self, target_dim: int, dim_mapping: list[int]) -> "TNN":
+        """
+        将TNN嵌入到更高维空间, 如 tnn.embed(5, [1, 3]) 将2维TNN u(x₀, x₁) 变为5维TNN v(x₀, x₁, x₂, x₃, x₄) = u(x₁, x₃)
+
+        参数:
+            target_dim: 目标维度数, 必须大于等于当前维度
+            dim_mapping: 维度映射列表, 长度必须等于当前维度
+                         dim_mapping[i] 表示原第i维映射到目标空间的第几维
+                         未映射的维度上subtnn恒为1
+
+        返回:
+            TNN: 升维后的新TNN实例
+        """
+        # 参数验证
+        if target_dim < self.dim:
+            raise ValueError(
+                f"target_dim({target_dim})必须大于等于当前维度({self.dim})"
+            )
+
+        if len(dim_mapping) != self.dim:
+            raise ValueError(
+                f"dim_mapping长度({len(dim_mapping)})必须等于当前维度({self.dim})"
+            )
+
+        # 检查映射索引的有效性和唯一性
+        for i, target_idx in enumerate(dim_mapping):
+            if target_idx < 0:
+                target_idx = target_dim + target_idx
+                dim_mapping[i] = target_idx
+
+            if not (0 <= target_idx < target_dim):
+                raise ValueError(
+                    f"dim_mapping[{i}]={target_idx}超出目标维度范围[0, {target_dim - 1}]"
+                )
+
+        if len(set(dim_mapping)) != len(dim_mapping):
+            raise ValueError("dim_mapping中存在重复的目标维度索引")
+
+        # 计算未映射的维度
+        mapped_dims_set = set(dim_mapping)
+        unmapped_dims = [
+            d for d in range(target_dim) if d not in mapped_dims_set
+        ]
+
+        class EmbeddedFunc(nn.Module):
+            def __init__(
+                self,
+                original_func: nn.Module,
+                original_dim: int,
+                target_dim: int,
+                dim_mapping: list[int],
+                unmapped_dims: list[int],
+            ):
+                super().__init__()
+                self.original_func = original_func
+                self.original_dim = original_dim
+                self.target_dim = target_dim
+                self.dim_mapping = dim_mapping
+                self.unmapped_dims = unmapped_dims
+
+                # 预计算张量索引
+                self.register_buffer(
+                    "dim_mapping_tensor",
+                    torch.tensor(dim_mapping, dtype=torch.long),
+                )
+                self.register_buffer(
+                    "unmapped_dims_tensor",
+                    torch.tensor(unmapped_dims, dtype=torch.long),
+                )
+
+                # 创建反向映射: target_dim_idx -> original_dim_idx (如果存在)
+                self.reverse_mapping = {
+                    v: k for k, v in enumerate(dim_mapping)
+                }
+
+            def _extract_mapped_input(self, x):
+                """从高维输入中提取映射维度"""
+                # x: (n_1d, target_dim) -> (n_1d, original_dim)
+                dim_mapping_on_device = self.dim_mapping_tensor.to(x.device)
+                return x[:, dim_mapping_on_device]
+
+            def _build_output(
+                self, original_output, n_1d, rank, device, dtype
+            ):
+                """构建高维输出, 未映射维度填1"""
+                # original_output: (n_1d, rank, original_dim)
+                # 返回: (n_1d, rank, target_dim)
+                output = torch.ones(
+                    n_1d, rank, self.target_dim, device=device, dtype=dtype
+                )
+                dim_mapping_on_device = self.dim_mapping_tensor.to(device)
+                output[:, :, dim_mapping_on_device] = original_output
+                return output
+
+            def forward(self, x):
+                """
+                x: (n_1d, target_dim)
+                返回: (n_1d, rank, target_dim)
+                """
+                n_1d = x.shape[0]
+
+                # 提取映射维度的输入
+                x_mapped = self._extract_mapped_input(x)
+
+                # 调用原函数
+                original_output = self.original_func(x_mapped)
+                rank = original_output.shape[1]
+
+                # 构建输出
+                return self._build_output(
+                    original_output, n_1d, rank, x.device, x.dtype
+                )
+
+            def forward_with_grad(self, x, grad_dim):
+                """
+                计算前向传播和一阶导数
+
+                对于映射维度: 正常计算导数
+                对于未映射维度: 导数为0 (常数1的导数)
+                """
+                if not hasattr(self.original_func, "forward_with_grad"):
+                    raise NotImplementedError(
+                        f"{type(self.original_func).__name__}不支持forward_with_grad"
+                    )
+
+                n_1d = x.shape[0]
+                x_mapped = self._extract_mapped_input(x)
+
+                # 检查grad_dim是否是映射维度
+                if grad_dim in self.reverse_mapping:
+                    # 映射维度: 正常计算导数
+                    original_grad_dim = self.reverse_mapping[grad_dim]
+                    original_output, original_grad = (
+                        self.original_func.forward_with_grad(
+                            x_mapped, original_grad_dim
+                        )
+                    )
+                    rank = original_output.shape[1]
+
+                    output = self._build_output(
+                        original_output, n_1d, rank, x.device, x.dtype
+                    )
+                    grad_output = self._build_output(
+                        original_grad, n_1d, rank, x.device, x.dtype
+                    )
+                else:
+                    # 未映射维度: 导数为0
+                    original_output = self.original_func(x_mapped)
+                    rank = original_output.shape[1]
+
+                    output = self._build_output(
+                        original_output, n_1d, rank, x.device, x.dtype
+                    )
+                    # grad_output: 映射维度保持原值, grad_dim位置为0
+                    grad_output = output.clone()
+                    grad_output[:, :, grad_dim] = 0.0
+
+                return output, grad_output
+
+            def forward_with_grad2(self, x, grad_dim1, grad_dim2):
+                """
+                计算前向传播和二阶导数
+
+                情况1: 两个都是映射维度 -> 正常计算
+                情况2: 至少一个是未映射维度 -> 结果为0
+                """
+                if not hasattr(self.original_func, "forward_with_grad2"):
+                    raise NotImplementedError(
+                        f"{type(self.original_func).__name__}不支持forward_with_grad2"
+                    )
+
+                n_1d = x.shape[0]
+                x_mapped = self._extract_mapped_input(x)
+
+                is_mapped1 = grad_dim1 in self.reverse_mapping
+                is_mapped2 = grad_dim2 in self.reverse_mapping
+
+                if is_mapped1 and is_mapped2:
+                    # 两个都是映射维度
+                    original_grad_dim1 = self.reverse_mapping[grad_dim1]
+                    original_grad_dim2 = self.reverse_mapping[grad_dim2]
+
+                    original_output, original_grad2 = (
+                        self.original_func.forward_with_grad2(
+                            x_mapped, original_grad_dim1, original_grad_dim2
+                        )
+                    )
+                    rank = original_output.shape[1]
+
+                    output = self._build_output(
+                        original_output, n_1d, rank, x.device, x.dtype
+                    )
+                    grad2_output = self._build_output(
+                        original_grad2, n_1d, rank, x.device, x.dtype
+                    )
+                else:
+                    # 至少一个是未映射维度
+                    original_output = self.original_func(x_mapped)
+                    rank = original_output.shape[1]
+
+                    output = self._build_output(
+                        original_output, n_1d, rank, x.device, x.dtype
+                    )
+                    # 二阶导数为0
+                    grad2_output = output.clone()
+                    if grad_dim1 == grad_dim2:
+                        grad2_output[:, :, grad_dim1] = 0.0
+                    else:
+                        # 混合导数: 两个维度都需要处理
+                        if not is_mapped1:
+                            grad2_output[:, :, grad_dim1] = 0.0
+                        if not is_mapped2:
+                            grad2_output[:, :, grad_dim2] = 0.0
+
+                return output, grad2_output
+
+            def forward_all_grad2(self, x):
+                """
+                计算所有维度的二阶导数 (主对角线)
+
+                映射维度: 正常计算
+                未映射维度: 一阶和二阶导数都为0
+                """
+                if not hasattr(self.original_func, "forward_all_grad2"):
+                    raise NotImplementedError(
+                        f"{type(self.original_func).__name__}不支持forward_all_grad2"
+                    )
+
+                n_1d = x.shape[0]
+                x_mapped = self._extract_mapped_input(x)
+
+                # 调用原函数
+                original_output, original_grad, original_grad2 = (
+                    self.original_func.forward_all_grad2(x_mapped)
+                )
+                rank = original_output.shape[1]
+
+                # 构建输出
+                output = self._build_output(
+                    original_output, n_1d, rank, x.device, x.dtype
+                )
+
+                # 一阶导数: 映射维度正常, 未映射维度为0
+                grad_output = torch.zeros(
+                    n_1d, rank, self.target_dim, device=x.device, dtype=x.dtype
+                )
+                dim_mapping_on_device = self.dim_mapping_tensor.to(x.device)
+                grad_output[:, :, dim_mapping_on_device] = original_grad
+
+                # 二阶导数: 映射维度正常, 未映射维度为0
+                grad2_output = torch.zeros(
+                    n_1d, rank, self.target_dim, device=x.device, dtype=x.dtype
+                )
+                grad2_output[:, :, dim_mapping_on_device] = original_grad2
+
+                return output, grad_output, grad2_output
+
+        embedded_func = EmbeddedFunc(
+            self.func,
+            self.dim,
+            target_dim,
+            dim_mapping,
+            unmapped_dims,
+        )
+
+        return TNN(
+            dim=target_dim,
+            rank=self.rank,
+            func=embedded_func,
+            theta=self.theta_module,
+        )
+
     def marginalize(
         self,
         domain_bounds: list[tuple[float, float] | None],
@@ -783,7 +1055,7 @@ class TNN(nn.Module):
         sub_intervals: int = 10,
     ) -> "TNN":
         """
-        对指定维度进行积分(边缘化), 返回降维后的新 TNN 实例
+        对指定维度进行积分, 返回降维后的新 TNN 实例
 
         参数:
             domain_bounds: 积分域边界列表, 长度必须等于 self.dim.
